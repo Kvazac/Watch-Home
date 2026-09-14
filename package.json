@@ -1,16 +1,20 @@
 {
   "name": "watch-home",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
+  "description": "Private Firefox watch-party synchronization extension and Cloudflare Worker.",
   "scripts": {
-    "build:extension": "node scripts/build-extension.mjs",
-    "lint:extension": "npm run build:extension && web-ext lint --source-dir build/extension",
-    "run:extension": "npm run build:extension && web-ext run --source-dir build/extension",
-    "package:extension": "npm run build:extension && web-ext build --source-dir build/extension --artifacts-dir artifacts --overwrite-dest",
+    "configure": "node scripts/configure.mjs",
     "dev:worker": "wrangler dev",
     "deploy:worker": "wrangler deploy",
-    "check:syntax": "node --check worker/index.js && node --check extension-src/netflix-player.js && node --check extension-src/sync-controller.js && node --check extension-src/party-client.js && node --check extension-src/content.js && node --check extension-src/popup/popup.js"
+    "lint:addon": "web-ext lint --source-dir extension",
+    "build:addon": "web-ext build --source-dir extension --artifacts-dir artifacts --overwrite-dest",
+    "test": "node --test tests/*.test.mjs",
+    "verify:release": "node scripts/verify-release.mjs"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "devDependencies": {
     "web-ext": "10.6.0",

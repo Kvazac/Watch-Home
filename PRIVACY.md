@@ -1,54 +1,56 @@
-# Privacy
+# Watch Home Privacy Notice
 
-Watch Home is designed for a small private group and does not include
-advertising, analytics, user accounts, or behavioral profiling.
+Last updated: 2026-09-14
 
-## Data transmitted while using a watch party
+Watch Home exists only to coordinate playback within an active private watch
+party.
 
-The extension transmits the minimum data needed to coordinate an active party:
+## Data transmitted for required functionality
+
+During an active party the extension can transmit:
 
 - a randomly generated room identifier;
-- the Netflix watch identifier for the active movie or episode;
+- the Netflix watch identifier for the active `/watch/...` page;
 - playback position;
-- play/pause and buffering state;
-- playback rate;
-- synchronization timestamps;
-- a random host-control token used to authenticate the party host.
+- play, pause, stall, and playback-rate state;
+- synchronization timestamps and sequence numbers;
+- a randomly generated local client identifier used to reconnect the host.
 
-The host token is hashed before it is stored in the room service.
+These values are required to synchronize playback.
 
-## Data not intentionally collected
+## Data not intentionally collected by the application
 
 Watch Home does not intentionally collect or transmit:
 
-- Netflix passwords or authentication credentials;
-- Netflix cookies;
-- names or email addresses;
-- subtitles, audio, or video;
-- general browsing history outside the active Netflix watch page;
+- Netflix usernames or passwords;
+- Netflix authentication cookies;
+- email addresses or real names;
+- audio or video content;
+- subtitles;
 - advertising identifiers;
 - analytics identifiers;
-- device fingerprints.
+- unrelated browsing history;
+- search terms.
 
-## Infrastructure
+## Storage
 
-Playback coordination is transported over HTTPS/WSS to Cloudflare Workers and
-Durable Objects. Network infrastructure necessarily processes connection
-metadata such as IP addresses, but Watch Home does not intentionally persist or
-use IP addresses for application functionality or analytics.
+Firefox local extension storage keeps the local client identifier and the
+current room session so that the extension can reconnect after a reload.
 
-Room state is temporary. The server schedules inactive room data for deletion
-after the configured room lifetime.
+The Cloudflare Durable Object stores only temporary room-coordination state.
+When the last participant disconnects, the application deletes the room's
+stored state.
 
-Firefox extension update checks are made to the HTTPS update manifest hosted on
-GitHub Pages, and signed XPI releases are downloaded from GitHub Releases.
+Cloudflare and GitHub may process network metadata such as IP addresses as
+infrastructure providers under their own policies. Watch Home does not use
+that metadata for application analytics, advertising, profiling, or room
+functionality.
 
-## Mozilla data categories
+## Distribution and updates
 
-The Firefox manifest declares required transmission of:
+Firefox checks the Watch Home GitHub Pages update manifest. Release files are
+hosted as Mozilla-signed XPI assets in GitHub Releases.
 
-- `browsingActivity`, because the active Netflix watch identifier is sent;
-- `websiteActivity`, because playback interactions and position are sent.
+## Contact
 
-These declarations must be revisited before release if the implementation's
-data handling changes.
+Use the GitHub repository issue tracker for privacy or security questions.

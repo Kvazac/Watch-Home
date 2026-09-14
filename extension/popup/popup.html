@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Watch Home</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Watch Home</h1>
+        <p id="subtitle">Private Netflix watch party</p>
+      </header>
+
+      <section id="idle-view">
+        <button id="create-button" class="primary" type="button">
+          Create party
+        </button>
+
+        <div class="divider"><span>or join</span></div>
+
+        <label for="room-input">Room code</label>
+        <input
+          id="room-input"
+          type="text"
+          inputmode="text"
+          maxlength="14"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="ABCD-EFGH-JKLM"
+        >
+        <button id="join-button" type="button">Join party</button>
+      </section>
+
+      <section id="session-view" hidden>
+        <div class="status-row">
+          <span id="status-dot" aria-hidden="true"></span>
+          <strong id="status-text">Connecting</strong>
+        </div>
+
+        <div class="room-panel">
+          <span>Room</span>
+          <strong id="room-code"></strong>
+        </div>
+
+        <p id="role-text"></p>
+        <p id="participants-text"></p>
+
+        <button id="copy-button" class="primary" type="button">
+          Copy invite
+        </button>
+        <button id="open-correct-button" type="button" hidden>
+          Open correct Netflix video
+        </button>
+        <button id="reconnect-button" type="button" hidden>
+          Reconnect
+        </button>
+        <button id="leave-button" class="danger" type="button">
+          Leave party
+        </button>
+      </section>
+
+      <p id="message" role="status"></p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

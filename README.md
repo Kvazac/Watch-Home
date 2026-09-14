@@ -1,89 +1,74 @@
 # Watch Home
 
-Private Firefox extension for synchronizing Netflix playback between a small
-trusted group.
-
-## Project layout
-
-- `worker/`: Cloudflare Worker + Durable Object room server.
-- `extension-src/`: readable Firefox extension source.
-- `scripts/`: deterministic extension build and update-manifest generation.
-- `pages/`: GitHub Pages landing page.
-- `.github/workflows/`: validation and signed-release automation.
-- `MOZILLA_COMPLIANCE.md`: release compliance checklist.
-- `PRIVACY.md`: data handling documentation.
-
-## Prerequisites
-
-- Node.js 22 or another currently supported Node.js release.
-- A Cloudflare account with Workers enabled.
-- A Mozilla Add-ons developer account.
-- GitHub repository `Kvazac/Watch-Home`.
-
-## First Cloudflare deployment
-
-1. Push this repository to the `main` branch.
-2. In Cloudflare, reconnect the GitHub integration if cloning fails.
-3. Keep the root directory `/`.
-4. Build command: none.
-5. Deploy command: `npx wrangler deploy`.
-6. Confirm the Worker name is exactly `watch-home`.
-7. After deployment, open `https://<worker-host>/health`.
-8. Put the resulting HTTPS origin into `project.config.json` as
-   `backendOrigin`.
-9. Commit and push that change.
-
-## Local extension validation
-
-```sh
-npm install
-npm run lint:extension
-npm run run:extension
-```
-
-`npm run build:extension` copies the readable source into `build/extension`
-and substitutes only project configuration values. It does not transpile,
-bundle, minify, or download code.
-
-## Release process
-
-Before the first release:
-
-1. Enable GitHub Pages with **GitHub Actions** as the source.
-2. Create AMO API credentials.
-3. Add repository Actions secrets:
-   - `AMO_JWT_ISSUER`
-   - `AMO_JWT_SECRET`
-4. Verify `project.config.json` contains the production backend URL.
-5. Verify `package.json` contains the release version.
-
-Create and push a matching tag:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The release workflow:
-
-1. Builds and lints the extension.
-2. Submits it to Mozilla as an **unlisted** add-on.
-3. Receives the Mozilla-signed XPI.
-4. Publishes that XPI in GitHub Releases.
-5. Generates `updates.json` with a SHA-256 hash.
-6. Deploys `updates.json` to GitHub Pages.
-
-Installed copies use:
-
-`https://kvazac.github.io/Watch-Home/updates.json`
-
-for Firefox's automatic update checks.
+Watch Home is a small, private Firefox extension that synchronizes Netflix
+playback between trusted participants. Every participant streams Netflix from
+their own Netflix account. Watch Home only coordinates playback state.
 
 ## User installation
 
-Users download the signed `.xpi` from the latest GitHub Release, then use:
+1. Open the latest GitHub Release.
+2. Download `watch-home-<version>.xpi`.
+3. In Firefox open **Add-ons and themes**.
+4. Open the gear menu and choose **Install Add-on From File**.
+5. Select the downloaded XPI.
 
-Firefox → Add-ons and themes → gear menu → Install Add-on From File.
+After the first installation, Firefox checks the self-hosted update manifest
+and can update later Mozilla-signed releases automatically.
 
-After the first installation, Firefox uses the update manifest for subsequent
-updates.
+## Use
+
+### Host
+
+1. Open a Netflix `/watch/...` page.
+2. Click the Watch Home toolbar button.
+3. Click **Create party**.
+4. Send the generated invite to the guest.
+
+### Guest
+
+1. Open the Netflix link from the invite.
+2. Click Watch Home.
+3. Paste the room code.
+4. Click **Join party**.
+
+The host is the playback authority in v1.
+
+## Repository layout
+
+- `extension/` — Firefox Manifest V3 extension.
+- `worker/` — Cloudflare Worker and Durable Object.
+- `scripts/` — configuration and release helpers.
+- `site/` — static files deployed to GitHub Pages.
+- `.github/workflows/` — CI and signed release automation.
+- `docs/` — administrator and testing documentation.
+
+## Development
+
+Requires Node.js 22 or newer.
+
+```bash
+npm install
+npm test
+npm run lint:addon
+npm run dev:worker
+```
+
+Before signing a production build, configure the final Workers URL:
+
+```bash
+npm run configure -- --backend https://watch-home.YOUR-SUBDOMAIN.workers.dev
+```
+
+Then commit the resulting changes.
+
+## Privacy
+
+See `PRIVACY.md`.
+
+## Mozilla conformity
+
+See `MOZILLA_COMPLIANCE.md`.
+
+## License
+
+MIT.

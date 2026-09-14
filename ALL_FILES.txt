@@ -1,0 +1,3307 @@
+
+===== .github/workflows/ci.yml =====
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Lint Firefox extension
+        run: npm run lint:addon
+
+      - name: Dry-run Cloudflare Worker build
+        run: npx wrangler deploy --dry-run --outdir .wrangler-dry-run
+
+===== .github/workflows/release.yml =====
+name: Sign and release Firefox extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version from extension/manifest.json, for example 1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Verify release configuration
+        run: node scripts/verify-release.mjs "${{ inputs.version }}"
+
+      - name: Run tests
+        run: npm test
+
+      - name: Lint Firefox extension
+        run: npm run lint:addon
+
+      - name: Sign unlisted XPI with Mozilla
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          rm -rf signed
+          mkdir -p signed
+          npx web-ext sign \
+            --source-dir extension \
+            --artifacts-dir signed \
+            --channel unlisted \
+            --amo-metadata amo-metadata.json \
+            --approval-timeout 900000
+
+          SIGNED_XPI="$(find signed -maxdepth 1 -type f -name '*.xpi' -print -quit)"
+          if [ -z "$SIGNED_XPI" ]; then
+            echo "Mozilla did not return a signed XPI."
+            exit 1
+          fi
+
+          cp "$SIGNED_XPI" "watch-home-${{ inputs.version }}.xpi"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          TAG="v${VERSION}"
+          XPI="watch-home-${VERSION}.xpi"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$XPI" --clobber
+          else
+            gh release create "$TAG" "$XPI" \
+              --target "${GITHUB_SHA}" \
+              --title "Watch Home ${VERSION}" \
+              --notes "Mozilla-signed Firefox release ${VERSION}."
+          fi
+
+      - name: Generate Firefox update manifest
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p pages
+          cp site/index.html pages/index.html
+          cp site/privacy.html pages/privacy.html
+
+          UPDATE_LINK="https://github.com/Kvazac/Watch-Home/releases/download/v${VERSION}/watch-home-${VERSION}.xpi"
+
+          node scripts/generate-update-manifest.mjs \
+            "$VERSION" \
+            "watch-home-${VERSION}.xpi" \
+            "$UPDATE_LINK" \
+            > pages/updates.json
+
+          cat pages/updates.json
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages
+
+  deploy-pages:
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy update manifest to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+===== .gitignore =====
+node_modules/
+web-ext-artifacts/
+signed/
+artifacts/
+.wrangler/
+.wrangler-dry-run/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
+
+===== LICENSE =====
+MIT License
+
+Copyright (c) 2026 Kvazac
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+===== MOZILLA_COMPLIANCE.md =====
+# Mozilla Add-on Conformity Checklist
+
+This file documents the intended conformity boundary for Watch Home. It is not
+a substitute for Mozilla validation or review. A release is considered
+production-ready only after `web-ext lint` passes and Mozilla returns a signed
+XPI.
+
+## Signing
+
+- Manifest V3 has a fixed Firefox add-on ID: `watch-home@Kvazac`.
+- Production builds are submitted to Mozilla as `unlisted`.
+- Only Mozilla-signed XPI files are distributed.
+- Self-hosting does not bypass Firefox signing requirements.
+
+Reference:
+https://support.mozilla.org/en-US/kb/add-on-signing-in-firefox
+
+## Distribution
+
+- Distribution is self-hosted through GitHub Releases.
+- The extension remains unlisted on AMO.
+- The extension uses an HTTPS self-hosted update manifest.
+- The update URL is fixed at:
+  `https://kvazac.github.io/Watch-Home/updates.json`
+
+## Permissions
+
+Required WebExtension permissions are intentionally narrow:
+
+- `storage` — client/session reconnection state;
+- Netflix host access — the page the extension synchronizes;
+- the configured Cloudflare Worker host — the synchronization service.
+
+The extension does not request:
+
+- cookies;
+- history;
+- bookmarks;
+- downloads;
+- all-sites access;
+- native messaging.
+
+## Data collection declaration
+
+The manifest declares required:
+
+- `browsingActivity` — the Netflix watch identifier identifies the active
+  Netflix watch page;
+- `websiteActivity` — play/pause/seek/rate/timing interactions are transmitted
+  for synchronization.
+
+The extension does not declare `none`, because synchronization requires these
+data to leave the local browser.
+
+## Executable code
+
+- All executable extension JavaScript is packaged inside the XPI.
+- No remote JavaScript is downloaded or executed.
+- No `eval` or equivalent dynamic-code loading is used.
+- Source is plain JavaScript with no minification or obfuscation.
+
+## Transport
+
+- Update traffic uses HTTPS.
+- Synchronization uses secure WebSocket (`wss://`) only.
+
+## Private browsing
+
+The manifest uses `incognito: "not_allowed"`.
+
+## Release gate
+
+Every release must pass:
+
+1. `npm test`
+2. `npm run lint:addon`
+3. production-backend placeholder verification
+4. Mozilla unlisted signing
+5. signed XPI upload to GitHub Releases
+6. generation/deployment of an update manifest containing the XPI SHA-256
+7. installation/update verification in normal Firefox
+
+Relevant Mozilla references:
+
+- https://support.mozilla.org/en-US/kb/add-on-signing-in-firefox
+- https://extensionworkshop.com/documentation/publish/signing-and-distribution-overview/
+- https://extensionworkshop.com/documentation/publish/add-on-policies/
+- https://extensionworkshop.com/documentation/manage/updating-your-extension/
+
+===== PRIVACY.md =====
+# Watch Home Privacy Notice
+
+Last updated: 2026-09-14
+
+Watch Home exists only to coordinate playback within an active private watch
+party.
+
+## Data transmitted for required functionality
+
+During an active party the extension can transmit:
+
+- a randomly generated room identifier;
+- the Netflix watch identifier for the active `/watch/...` page;
+- playback position;
+- play, pause, stall, and playback-rate state;
+- synchronization timestamps and sequence numbers;
+- a randomly generated local client identifier used to reconnect the host.
+
+These values are required to synchronize playback.
+
+## Data not intentionally collected by the application
+
+Watch Home does not intentionally collect or transmit:
+
+- Netflix usernames or passwords;
+- Netflix authentication cookies;
+- email addresses or real names;
+- audio or video content;
+- subtitles;
+- advertising identifiers;
+- analytics identifiers;
+- unrelated browsing history;
+- search terms.
+
+## Storage
+
+Firefox local extension storage keeps the local client identifier and the
+current room session so that the extension can reconnect after a reload.
+
+The Cloudflare Durable Object stores only temporary room-coordination state.
+When the last participant disconnects, the application deletes the room's
+stored state.
+
+Cloudflare and GitHub may process network metadata such as IP addresses as
+infrastructure providers under their own policies. Watch Home does not use
+that metadata for application analytics, advertising, profiling, or room
+functionality.
+
+## Distribution and updates
+
+Firefox checks the Watch Home GitHub Pages update manifest. Release files are
+hosted as Mozilla-signed XPI assets in GitHub Releases.
+
+## Contact
+
+Use the GitHub repository issue tracker for privacy or security questions.
+
+===== README.md =====
+# Watch Home
+
+Watch Home is a small, private Firefox extension that synchronizes Netflix
+playback between trusted participants. Every participant streams Netflix from
+their own Netflix account. Watch Home only coordinates playback state.
+
+## User installation
+
+1. Open the latest GitHub Release.
+2. Download `watch-home-<version>.xpi`.
+3. In Firefox open **Add-ons and themes**.
+4. Open the gear menu and choose **Install Add-on From File**.
+5. Select the downloaded XPI.
+
+After the first installation, Firefox checks the self-hosted update manifest
+and can update later Mozilla-signed releases automatically.
+
+## Use
+
+### Host
+
+1. Open a Netflix `/watch/...` page.
+2. Click the Watch Home toolbar button.
+3. Click **Create party**.
+4. Send the generated invite to the guest.
+
+### Guest
+
+1. Open the Netflix link from the invite.
+2. Click Watch Home.
+3. Paste the room code.
+4. Click **Join party**.
+
+The host is the playback authority in v1.
+
+## Repository layout
+
+- `extension/` — Firefox Manifest V3 extension.
+- `worker/` — Cloudflare Worker and Durable Object.
+- `scripts/` — configuration and release helpers.
+- `site/` — static files deployed to GitHub Pages.
+- `.github/workflows/` — CI and signed release automation.
+- `docs/` — administrator and testing documentation.
+
+## Development
+
+Requires Node.js 22 or newer.
+
+```bash
+npm install
+npm test
+npm run lint:addon
+npm run dev:worker
+```
+
+Before signing a production build, configure the final Workers URL:
+
+```bash
+npm run configure -- --backend https://watch-home.YOUR-SUBDOMAIN.workers.dev
+```
+
+Then commit the resulting changes.
+
+## Privacy
+
+See `PRIVACY.md`.
+
+## Mozilla conformity
+
+See `MOZILLA_COMPLIANCE.md`.
+
+## License
+
+MIT.
+
+===== amo-metadata.json =====
+{
+  "summary": {
+    "en-US": "Synchronizes Netflix playback for a small private watch party."
+  },
+  "categories": [
+    "other"
+  ],
+  "version": {
+    "license": "MIT"
+  }
+}
+
+===== docs/ADMIN_SETUP.md =====
+# Administrator Setup
+
+This is the from-scratch setup sequence for `Kvazac/Watch-Home`.
+
+## 1. Make the GitHub repository usable by Cloudflare
+
+The current Cloudflare failure occurs during repository cloning, before
+Wrangler or application code executes.
+
+For the simplest zero-cost setup, make the repository public. GitHub Pages on
+GitHub Free requires a public repository.
+
+If you keep it private, make sure the **Cloudflare Workers and Pages** GitHub
+App has explicit access to `Kvazac/Watch-Home`, then reconnect it under the
+Worker's **Settings > Builds > Git Repository**.
+
+After access is fixed, retry the build.
+
+## 2. Upload this repository scaffold
+
+Upload everything at the repository root.
+
+If `.github` is hidden by your operating system or GitHub upload dialog, create
+the workflow files directly in GitHub:
+
+- `.github/workflows/ci.yml`
+- `.github/workflows/release.yml`
+
+Using git from a local clone is more reliable because hidden folders are
+included normally.
+
+## 3. Cloudflare Worker build settings
+
+Use:
+
+- Root directory: `/`
+- Build command: none
+- Deploy command: `npx wrangler deploy`
+
+The Worker script name must match `wrangler.jsonc`:
+
+`watch-home`
+
+If Cloudflare reports a Worker-name mismatch, check the actual Worker script
+name in Cloudflare and either rename the Worker to `watch-home` or update the
+`name` field in `wrangler.jsonc`.
+
+## 4. Deploy the Worker
+
+After the repository clone succeeds, Cloudflare installs the npm dependencies
+and runs Wrangler.
+
+Confirm:
+
+`https://<your-worker-host>/health`
+
+returns JSON with `"ok": true`.
+
+Copy the exact HTTPS `workers.dev` origin.
+
+## 5. Configure the extension with the Worker origin
+
+Run locally:
+
+```bash
+npm install
+npm run configure -- --backend https://watch-home.YOUR-SUBDOMAIN.workers.dev
+npm test
+npm run lint:addon
+```
+
+Commit the changed `extension/config.js` and `extension/manifest.json`.
+
+If you do not use a local git clone, manually replace the placeholder Worker
+origin in those same two files.
+
+## 6. Enable GitHub Pages
+
+Open:
+
+Repository > Settings > Pages
+
+Set **Source** to **GitHub Actions**.
+
+Do not choose a branch source. The release workflow deploys the update
+manifest directly after a signed release is created.
+
+The permanent update URL embedded in the extension is:
+
+`https://kvazac.github.io/Watch-Home/updates.json`
+
+Do not rename/delete the repository after distributing v1 unless you also
+maintain a redirect/recovery strategy.
+
+## 7. Create a Mozilla Add-ons developer account
+
+Sign in to the AMO Developer Hub and create API credentials.
+
+Record:
+
+- JWT issuer
+- JWT secret
+
+Production Firefox requires self-distributed extensions to be Mozilla-signed.
+
+## 8. Add GitHub Actions secrets
+
+Repository > Settings > Secrets and variables > Actions
+
+Create:
+
+- `AMO_JWT_ISSUER`
+- `AMO_JWT_SECRET`
+
+Never commit these values.
+
+## 9. Test locally before signing
+
+Run:
+
+```bash
+npm install
+npm test
+npm run lint:addon
+npm run build:addon
+```
+
+For temporary development testing:
+
+```bash
+npx web-ext run --source-dir extension
+```
+
+Use two Firefox profiles/windows to test host and guest behavior.
+
+## 10. Run the first signed release
+
+The manifest starts at version `1.0.0`.
+
+Open:
+
+Repository > Actions > Sign and release Firefox extension > Run workflow
+
+Enter:
+
+`1.0.0`
+
+The workflow:
+
+1. installs Node 22 dependencies;
+2. runs tests;
+3. runs `web-ext lint`;
+4. verifies the real Worker URL is configured;
+5. submits the extension to Mozilla for **unlisted** signing;
+6. renames the signed file to `watch-home-1.0.0.xpi`;
+7. creates GitHub Release `v1.0.0`;
+8. generates `updates.json` with the signed XPI SHA-256;
+9. deploys the update manifest to GitHub Pages.
+
+Mozilla can delay signing if manual review is selected. Re-run only after
+checking the AMO version status.
+
+## 11. Verify v1 installation
+
+Download the XPI from the GitHub Release.
+
+In normal Firefox:
+
+Add-ons and themes > gear menu > Install Add-on From File
+
+Install the XPI.
+
+Unsigned builds must not be distributed.
+
+## 12. Verify automatic updates before giving v1 to users
+
+Create a small test update:
+
+1. change `extension/manifest.json` from `1.0.0` to `1.0.1`;
+2. commit;
+3. run the release workflow with `1.0.1`;
+4. confirm GitHub Pages `updates.json` now advertises `1.0.1`;
+5. in the Firefox test profile, use **Check for Updates** in Add-ons Manager;
+6. confirm Firefox updates from `1.0.0` to `1.0.1` without manual XPI install.
+
+After this passes, distribute the latest signed XPI to the intended users.
+
+## Normal future release routine
+
+1. update code;
+2. bump `extension/manifest.json`;
+3. commit;
+4. run CI;
+5. manually run the release workflow with the matching version;
+6. verify the GitHub Release and Pages update manifest.
+
+===== docs/TESTING.md =====
+# v1 Test Matrix
+
+## Backend
+
+- `/health` returns HTTP 200.
+- invalid room IDs are rejected.
+- a guest cannot create a room without a host.
+- a second unrelated host cannot replace the active host.
+- host reconnect with the same client ID succeeds.
+- room state is deleted after the last socket closes.
+
+## Playback
+
+Use two Firefox profiles with Netflix open to the same title.
+
+- guest joins late and catches up;
+- host play propagates;
+- host pause propagates;
+- host seek propagates;
+- host playback-rate change propagates;
+- guest local pause is corrected back to the host timeline;
+- guest local seek is corrected;
+- guest buffer does not stop host;
+- guest recovery performs at most one hard correction;
+- host buffer freezes guests after the debounce period;
+- host resume restarts guests;
+- 100–400 ms drift is corrected without a visible seek;
+- >1.5 s drift uses a predictive seek;
+- host refresh/reconnect restores the party;
+- guest refresh/reconnect restores the party;
+- wrong Netflix watch ID is reported;
+- tab navigation to another Netflix watch ID is reported.
+
+## Release
+
+- `npm test` passes.
+- `npm run lint:addon` passes.
+- normal Firefox rejects the unsigned build.
+- normal Firefox installs the Mozilla-signed XPI.
+- GitHub Pages serves `updates.json`.
+- update manifest references the signed GitHub Release asset.
+- update SHA-256 matches the XPI.
+- v1.0.0 automatically updates to a signed v1.0.1 test release.
+
+===== extension/background.js =====
+"use strict";
+
+(() => {
+  const { MessageType } = globalThis.WatchHomeProtocol;
+  const config = globalThis.WatchHomeConfig;
+
+  let socket = null;
+  let socketGeneration = 0;
+  let reconnectTimer = null;
+  let reconnectAttempt = 0;
+  let clockTimer = null;
+  let clockSamples = [];
+  let clockOffsetMs = 0;
+  let contentPorts = new Map();
+  let session = null;
+  let lastRoomState = null;
+  let participantCount = 0;
+  let intentionallyClosed = false;
+
+  const ready = restoreState();
+
+  browser.runtime.onConnect.addListener((port) => {
+    if (port.name !== "watch-home-netflix") {
+      return;
+    }
+
+    const info = {
+      watchId: null,
+      url: null
+    };
+
+    contentPorts.set(port, info);
+
+    port.onMessage.addListener((message) => {
+      void ready.then(() => handleContentMessage(port, message));
+    });
+
+    port.onDisconnect.addListener(() => {
+      contentPorts.delete(port);
+    });
+
+    void ready.then(async () => {
+      postToPort(port, {
+        type: MessageType.SESSION,
+        session: publicSession(),
+        clockOffsetMs
+      });
+
+      if (lastRoomState) {
+        postToPort(port, {
+          type: MessageType.ROOM_STATE,
+          state: lastRoomState,
+          clockOffsetMs
+        });
+      }
+
+      if (session && !isSocketUsable()) {
+        await connectWebSocket();
+      }
+    });
+  });
+
+  browser.runtime.onMessage.addListener((message) => {
+    return ready.then(() => handleRuntimeMessage(message));
+  });
+
+  browser.runtime.onStartup.addListener(() => {
+    void ready.then(() => {
+      if (session && contentPorts.size > 0) {
+        return connectWebSocket();
+      }
+      return null;
+    });
+  });
+
+  async function restoreState() {
+    const stored = await browser.storage.local.get([
+      "watchHomeClientId",
+      "watchHomeSession"
+    ]);
+
+    if (!stored.watchHomeClientId) {
+      stored.watchHomeClientId = globalThis.WatchHomeProtocol.createClientId();
+      await browser.storage.local.set({
+        watchHomeClientId: stored.watchHomeClientId
+      });
+    }
+
+    session = stored.watchHomeSession ?? null;
+  }
+
+  async function handleRuntimeMessage(message) {
+    switch (message?.type) {
+      case "POPUP_GET_STATUS":
+        return buildStatus();
+
+      case "POPUP_CREATE":
+        return createParty();
+
+      case "POPUP_JOIN":
+        return joinParty(message.roomId);
+
+      case "POPUP_LEAVE":
+        await leaveParty();
+        return buildStatus();
+
+      case "POPUP_RECONNECT":
+        await connectWebSocket(true);
+        return buildStatus();
+
+      case "POPUP_OPEN_CORRECT":
+        if (lastRoomState?.watchId) {
+          await browser.tabs.create({
+            url: `https://www.netflix.com/watch/${lastRoomState.watchId}`
+          });
+        }
+        return buildStatus();
+
+      default:
+        return null;
+    }
+  }
+
+  async function handleContentMessage(port, message) {
+    const info = contentPorts.get(port);
+    if (!info) {
+      return;
+    }
+
+    switch (message.type) {
+      case MessageType.CONTENT_READY:
+        info.watchId = message.watchId ?? null;
+        info.url = message.url ?? null;
+        contentPorts.set(port, info);
+
+        postToPort(port, {
+          type: MessageType.SESSION,
+          session: publicSession(),
+          clockOffsetMs
+        });
+
+        if (lastRoomState) {
+          postToPort(port, {
+            type: MessageType.ROOM_STATE,
+            state: lastRoomState,
+            clockOffsetMs
+          });
+        }
+        break;
+
+      case MessageType.HOST_STATE:
+        if (session?.role !== "host" || !isSocketOpen()) {
+          return;
+        }
+
+        sendSocket({
+          type: MessageType.HOST_STATE,
+          reason: message.reason,
+          state: message.state,
+          estimatedServerTime: Date.now() + clockOffsetMs
+        });
+        break;
+
+      case MessageType.REQUEST_STATE:
+        if (isSocketOpen()) {
+          sendSocket({ type: MessageType.REQUEST_STATE });
+        }
+        break;
+
+      case MessageType.PLAYER_ERROR:
+        if (session) {
+          session.lastError = message.message;
+          await persistSession();
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  async function createParty() {
+    const active = activeContent();
+    if (!active?.watchId) {
+      return {
+        ok: false,
+        error: "Open a Netflix movie or episode before creating a party."
+      };
+    }
+
+    const roomId = globalThis.WatchHomeProtocol.createRoomId();
+    await startSession({
+      roomId,
+      role: "host",
+      watchId: active.watchId
+    });
+
+    return {
+      ok: true,
+      ...buildStatus()
+    };
+  }
+
+  async function joinParty(rawRoomId) {
+    const roomId = globalThis.WatchHomeProtocol.normalizeRoomId(rawRoomId);
+    if (!globalThis.WatchHomeProtocol.isValidRoomId(roomId)) {
+      return {
+        ok: false,
+        error: "Enter the complete 12-character room code."
+      };
+    }
+
+    if (!activeContent()?.watchId) {
+      return {
+        ok: false,
+        error: "Open the Netflix watch page from the host invite first."
+      };
+    }
+
+    await startSession({
+      roomId,
+      role: "guest",
+      watchId: activeContent()?.watchId ?? null
+    });
+
+    return {
+      ok: true,
+      ...buildStatus()
+    };
+  }
+
+  async function startSession(nextSession) {
+    intentionallyClosed = true;
+    closeSocket();
+
+    session = {
+      ...nextSession,
+      connected: false,
+      status: "connecting",
+      lastError: null
+    };
+    lastRoomState = null;
+    participantCount = 0;
+    reconnectAttempt = 0;
+
+    await persistSession();
+    intentionallyClosed = false;
+    await connectWebSocket(true);
+    broadcastSession();
+  }
+
+  async function leaveParty() {
+    intentionallyClosed = true;
+
+    if (isSocketOpen()) {
+      sendSocket({ type: MessageType.LEAVE });
+    }
+
+    closeSocket();
+    session = null;
+    lastRoomState = null;
+    participantCount = 0;
+    reconnectAttempt = 0;
+    clockSamples = [];
+    clockOffsetMs = 0;
+
+    await browser.storage.local.remove("watchHomeSession");
+    broadcastSession();
+
+    intentionallyClosed = false;
+  }
+
+  async function connectWebSocket(force = false) {
+    if (!session) {
+      return;
+    }
+
+    if (
+      config.backendWsOrigin.includes("example.workers.dev")
+    ) {
+      session.status = "configuration-error";
+      session.lastError =
+        "The production Cloudflare Worker URL has not been configured.";
+      await persistSession();
+      broadcastSession();
+      return;
+    }
+
+    if (!force && isSocketUsable()) {
+      return;
+    }
+
+    clearReconnectTimer();
+    closeSocket();
+
+    const stored = await browser.storage.local.get("watchHomeClientId");
+    const clientId = stored.watchHomeClientId;
+    const generation = ++socketGeneration;
+    const query = new URLSearchParams({
+      role: session.role,
+      clientId
+    });
+
+    session.connected = false;
+    session.status = "connecting";
+    await persistSession();
+    broadcastSession();
+
+    const ws = new WebSocket(
+      `${config.backendWsOrigin}/ws/${session.roomId}?${query.toString()}`
+    );
+
+    socket = ws;
+
+    ws.addEventListener("open", () => {
+      if (generation !== socketGeneration) {
+        ws.close();
+        return;
+      }
+
+      reconnectAttempt = 0;
+      startClockSync();
+      sendPing();
+    });
+
+    ws.addEventListener("message", (event) => {
+      if (generation !== socketGeneration) {
+        return;
+      }
+
+      handleSocketMessage(event.data);
+    });
+
+    ws.addEventListener("close", () => {
+      if (generation !== socketGeneration) {
+        return;
+      }
+
+      stopClockSync();
+      socket = null;
+
+      if (session) {
+        session.connected = false;
+        session.status = "disconnected";
+        void persistSession();
+        broadcastSession();
+      }
+
+      if (!intentionallyClosed && session) {
+        scheduleReconnect();
+      }
+    });
+
+    ws.addEventListener("error", () => {
+      if (session) {
+        session.lastError = "Could not reach the Watch Home server.";
+        void persistSession();
+        broadcastSession();
+      }
+    });
+  }
+
+  function handleSocketMessage(rawMessage) {
+    let message;
+
+    try {
+      message = JSON.parse(rawMessage);
+    } catch {
+      return;
+    }
+
+    switch (message.type) {
+      case MessageType.WELCOME:
+        session.connected = true;
+        session.status = "connected";
+        session.role = message.role;
+        session.lastError = null;
+        participantCount = message.participantCount ?? participantCount;
+        lastRoomState = message.state ?? lastRoomState;
+        void persistSession();
+
+        if (Number.isFinite(message.serverTime)) {
+          addClockSample(Date.now(), Date.now(), message.serverTime);
+        }
+
+        broadcastSession();
+
+        if (lastRoomState) {
+          broadcastToContent({
+            type: MessageType.ROOM_STATE,
+            state: lastRoomState,
+            clockOffsetMs
+          });
+        }
+        break;
+
+      case MessageType.PONG:
+        addClockSample(
+          message.clientSentAt,
+          Date.now(),
+          message.serverTime
+        );
+        break;
+
+      case MessageType.ROOM_STATE:
+        lastRoomState = message.state;
+        broadcastToContent({
+          type: MessageType.ROOM_STATE,
+          state: lastRoomState,
+          clockOffsetMs
+        });
+        break;
+
+      case MessageType.HOST_OFFLINE:
+        lastRoomState = message.state ?? lastRoomState;
+        broadcastToContent({
+          type: MessageType.HOST_OFFLINE,
+          state: lastRoomState
+        });
+        break;
+
+      case MessageType.PRESENCE:
+        participantCount = message.participantCount ?? participantCount;
+        break;
+
+      case MessageType.ERROR:
+        if (session) {
+          session.lastError = message.message ?? "Server rejected the request.";
+          session.status = "error";
+          void persistSession();
+          broadcastSession();
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  function addClockSample(clientSentAt, clientReceivedAt, serverTime) {
+    if (
+      !Number.isFinite(clientSentAt) ||
+      !Number.isFinite(clientReceivedAt) ||
+      !Number.isFinite(serverTime)
+    ) {
+      return;
+    }
+
+    const rtt = Math.max(0, clientReceivedAt - clientSentAt);
+    const midpoint = (clientSentAt + clientReceivedAt) / 2;
+    const offset = serverTime - midpoint;
+
+    clockSamples.push({ rtt, offset });
+    clockSamples = clockSamples.slice(-9);
+
+    const preferred = [...clockSamples]
+      .sort((left, right) => left.rtt - right.rtt)
+      .slice(0, Math.min(3, clockSamples.length));
+
+    clockOffsetMs =
+      preferred.reduce((sum, sample) => sum + sample.offset, 0) /
+      preferred.length;
+
+    broadcastToContent({
+      type: MessageType.CLOCK,
+      clockOffsetMs
+    });
+  }
+
+  function startClockSync() {
+    stopClockSync();
+    clockTimer = setInterval(sendPing, config.clockSyncIntervalMs);
+  }
+
+  function stopClockSync() {
+    if (clockTimer !== null) {
+      clearInterval(clockTimer);
+      clockTimer = null;
+    }
+  }
+
+  function sendPing() {
+    if (!isSocketOpen()) {
+      return;
+    }
+
+    sendSocket({
+      type: MessageType.PING,
+      clientSentAt: Date.now()
+    });
+  }
+
+  function sendSocket(payload) {
+    if (!isSocketOpen()) {
+      return;
+    }
+
+    socket.send(JSON.stringify(payload));
+  }
+
+  function scheduleReconnect() {
+    clearReconnectTimer();
+
+    const delay = Math.min(
+      config.reconnectMaxMs,
+      config.reconnectBaseMs * 2 ** reconnectAttempt
+    );
+    reconnectAttempt += 1;
+
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      void connectWebSocket(true);
+    }, delay);
+  }
+
+  function clearReconnectTimer() {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  }
+
+  function closeSocket() {
+    stopClockSync();
+
+    if (socket) {
+      socketGeneration += 1;
+
+      try {
+        socket.close(1000, "Client reconnecting");
+      } catch {
+        // The socket may already be closing.
+      }
+
+      socket = null;
+    }
+  }
+
+  function isSocketOpen() {
+    return socket?.readyState === WebSocket.OPEN;
+  }
+
+  function isSocketUsable() {
+    return (
+      socket &&
+      (socket.readyState === WebSocket.OPEN ||
+        socket.readyState === WebSocket.CONNECTING)
+    );
+  }
+
+  function activeContent() {
+    for (const info of contentPorts.values()) {
+      if (info.watchId) {
+        return info;
+      }
+    }
+
+    return null;
+  }
+
+  function buildStatus() {
+    const active = activeContent();
+    const mismatch = Boolean(
+      session?.role === "guest" &&
+      lastRoomState?.watchId &&
+      active?.watchId &&
+      lastRoomState.watchId !== active.watchId
+    );
+
+    return {
+      ok: true,
+      session: publicSession(),
+      roomIdFormatted: session
+        ? globalThis.WatchHomeProtocol.formatRoomId(session.roomId)
+        : null,
+      participantCount,
+      activeWatchId: active?.watchId ?? null,
+      partyWatchId: lastRoomState?.watchId ?? null,
+      mismatch,
+      invite: session?.roomId
+        ? buildInvite(session.roomId, lastRoomState?.watchId ?? active?.watchId)
+        : null
+    };
+  }
+
+  function buildInvite(roomId, watchId) {
+    const roomCode = globalThis.WatchHomeProtocol.formatRoomId(roomId);
+    const netflixUrl = watchId
+      ? `https://www.netflix.com/watch/${watchId}`
+      : "https://www.netflix.com/";
+
+    return `Watch Home\n\nNetflix:\n${netflixUrl}\n\nRoom:\n${roomCode}`;
+  }
+
+  function publicSession() {
+    if (!session) {
+      return null;
+    }
+
+    return {
+      roomId: session.roomId,
+      role: session.role,
+      connected: Boolean(session.connected),
+      status: session.status,
+      lastError: session.lastError ?? null
+    };
+  }
+
+  function broadcastSession() {
+    broadcastToContent({
+      type: MessageType.SESSION,
+      session: publicSession(),
+      clockOffsetMs
+    });
+  }
+
+  function broadcastToContent(message) {
+    for (const port of contentPorts.keys()) {
+      postToPort(port, message);
+    }
+  }
+
+  function postToPort(port, message) {
+    try {
+      port.postMessage(message);
+    } catch {
+      contentPorts.delete(port);
+    }
+  }
+
+  async function persistSession() {
+    if (!session) {
+      await browser.storage.local.remove("watchHomeSession");
+      return;
+    }
+
+    await browser.storage.local.set({
+      watchHomeSession: session
+    });
+  }
+})();
+
+===== extension/config.js =====
+"use strict";
+
+globalThis.WatchHomeConfig = Object.freeze({
+  backendHttpOrigin: "https://watch-home.example.workers.dev",
+  backendWsOrigin: "wss://watch-home.example.workers.dev",
+  heartbeatIntervalMs: 2500,
+  clockSyncIntervalMs: 10000,
+  hostStallDebounceMs: 200,
+  reconnectBaseMs: 500,
+  reconnectMaxMs: 10000
+});
+
+===== extension/content.js =====
+"use strict";
+
+(() => {
+  const { MessageType } = globalThis.WatchHomeProtocol;
+  const player = new globalThis.NetflixPlayerAdapter();
+  const controller = new globalThis.WatchHomeSyncController(
+    player,
+    (message) => sendPortMessage({
+      type: MessageType.PLAYER_ERROR,
+      message
+    })
+  );
+
+  let port = null;
+  let reconnectTimer = null;
+  let session = null;
+  let clockOffsetMs = 0;
+  let latestRoomState = null;
+  let hostStalled = false;
+  let stallTimer = null;
+  let heartbeatTimer = null;
+
+  function connectPort() {
+    if (port) {
+      return;
+    }
+
+    port = browser.runtime.connect({ name: "watch-home-netflix" });
+
+    port.onMessage.addListener(handleBackgroundMessage);
+    port.onDisconnect.addListener(() => {
+      port = null;
+
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connectPort();
+      }, 750);
+    });
+
+    announceContent();
+  }
+
+  function sendPortMessage(message) {
+    try {
+      port?.postMessage(message);
+    } catch (error) {
+      console.warn("Watch Home port message failed", error);
+    }
+  }
+
+  function announceContent() {
+    sendPortMessage({
+      type: MessageType.CONTENT_READY,
+      watchId: player.getWatchId(),
+      url: window.location.href
+    });
+  }
+
+  function handleBackgroundMessage(message) {
+    switch (message.type) {
+      case MessageType.SESSION:
+        session = message.session;
+        clockOffsetMs = message.clockOffsetMs ?? clockOffsetMs;
+
+        if (session?.role === "host" && session.connected) {
+          sendHostState("session-ready");
+        }
+        break;
+
+      case MessageType.CLOCK:
+        clockOffsetMs = message.clockOffsetMs;
+        controller.updateClockOffset(clockOffsetMs);
+        break;
+
+      case MessageType.ROOM_STATE:
+        latestRoomState = message.state;
+        clockOffsetMs = message.clockOffsetMs ?? clockOffsetMs;
+
+        if (session?.role === "guest") {
+          controller.applyRoomState(latestRoomState, clockOffsetMs);
+        }
+        break;
+
+      case MessageType.HOST_OFFLINE:
+        latestRoomState = message.state ?? latestRoomState;
+
+        if (session?.role === "guest" && latestRoomState) {
+          controller.applyRoomState(latestRoomState, clockOffsetMs);
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  function sendHostState(reason, modeOverride = null) {
+    if (session?.role !== "host" || !session.connected) {
+      return;
+    }
+
+    const state = player.getState(modeOverride ?? (hostStalled ? "stalled" : null));
+    if (!state) {
+      return;
+    }
+
+    sendPortMessage({
+      type: MessageType.HOST_STATE,
+      reason,
+      state
+    });
+  }
+
+  function handleGuestLocalMutation() {
+    if (
+      session?.role !== "guest" ||
+      controller.isSuppressingLocalEvents() ||
+      !latestRoomState
+    ) {
+      return;
+    }
+
+    window.setTimeout(() => controller.reapplyNow(), 25);
+  }
+
+  player.on("play", () => {
+    if (session?.role === "host" && !hostStalled) {
+      sendHostState("play", "playing");
+    } else {
+      handleGuestLocalMutation();
+    }
+  });
+
+  player.on("pause", () => {
+    if (session?.role === "host") {
+      hostStalled = false;
+      sendHostState("pause", "paused");
+    } else {
+      handleGuestLocalMutation();
+    }
+  });
+
+  player.on("seeked", () => {
+    if (session?.role === "host") {
+      sendHostState("seek");
+    } else {
+      handleGuestLocalMutation();
+    }
+  });
+
+  player.on("ratechange", () => {
+    if (session?.role === "host") {
+      sendHostState("ratechange");
+    } else {
+      handleGuestLocalMutation();
+    }
+  });
+
+  player.on("waiting", ({ video }) => {
+    if (session?.role !== "host" || video.paused) {
+      return;
+    }
+
+    if (stallTimer !== null) {
+      window.clearTimeout(stallTimer);
+    }
+
+    stallTimer = window.setTimeout(() => {
+      stallTimer = null;
+
+      if (
+        session?.role === "host" &&
+        !video.paused &&
+        video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA
+      ) {
+        hostStalled = true;
+        sendHostState("stall", "stalled");
+      }
+    }, 200);
+  });
+
+  player.on("playing", () => {
+    if (stallTimer !== null) {
+      window.clearTimeout(stallTimer);
+      stallTimer = null;
+    }
+
+    if (session?.role === "host" && hostStalled) {
+      hostStalled = false;
+      sendHostState("stall-recovered", "playing");
+    }
+  });
+
+  player.on("navigation", () => {
+    announceContent();
+    latestRoomState = null;
+
+    if (session?.role === "host") {
+      window.setTimeout(() => sendHostState("navigation"), 500);
+    }
+  });
+
+  player.on("videochange", () => {
+    if (session?.role === "host") {
+      window.setTimeout(() => sendHostState("videochange"), 250);
+    }
+  });
+
+  player.start();
+  controller.start();
+  connectPort();
+
+  heartbeatTimer = window.setInterval(() => {
+    if (session?.role === "host" && session.connected) {
+      sendHostState("heartbeat");
+    }
+  }, 2500);
+
+  window.addEventListener("pagehide", () => {
+    if (heartbeatTimer !== null) {
+      window.clearInterval(heartbeatTimer);
+    }
+
+    player.stop();
+    controller.stop();
+    port?.disconnect();
+  });
+})();
+
+===== extension/manifest.json =====
+{
+  "manifest_version": 3,
+  "name": "Watch Home",
+  "version": "1.0.0",
+  "description": "Synchronize Netflix playback for a small private watch party.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "watch-home@Kvazac",
+      "strict_min_version": "140.0",
+      "update_url": "https://kvazac.github.io/Watch-Home/updates.json",
+      "data_collection_permissions": {
+        "required": [
+          "browsingActivity",
+          "websiteActivity"
+        ]
+      }
+    }
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.netflix.com/*",
+    "https://watch-home.example.workers.dev/*"
+  ],
+  "background": {
+    "scripts": [
+      "config.js",
+      "shared/protocol.js",
+      "background.js"
+    ],
+    "persistent": false
+  },
+  "action": {
+    "default_title": "Watch Home",
+    "default_popup": "popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.netflix.com/watch/*"
+      ],
+      "js": [
+        "shared/protocol.js",
+        "netflix-player.js",
+        "sync-controller.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "incognito": "not_allowed"
+}
+
+===== extension/netflix-player.js =====
+"use strict";
+
+(() => {
+  class NetflixPlayerAdapter {
+    constructor() {
+      this.video = null;
+      this.watchId = this.getWatchId();
+      this.listeners = new Map();
+      this.monitorTimer = null;
+      this.boundForwarders = new Map();
+    }
+
+    start() {
+      this.attachCurrentVideo();
+      this.monitorTimer = window.setInterval(() => {
+        this.attachCurrentVideo();
+
+        const nextWatchId = this.getWatchId();
+        if (nextWatchId !== this.watchId) {
+          this.watchId = nextWatchId;
+          this.emit("navigation", { watchId: nextWatchId });
+        }
+      }, 500);
+    }
+
+    stop() {
+      if (this.monitorTimer !== null) {
+        window.clearInterval(this.monitorTimer);
+        this.monitorTimer = null;
+      }
+
+      this.detachVideo();
+    }
+
+    on(eventName, callback) {
+      if (!this.listeners.has(eventName)) {
+        this.listeners.set(eventName, new Set());
+      }
+
+      this.listeners.get(eventName).add(callback);
+      return () => this.listeners.get(eventName)?.delete(callback);
+    }
+
+    emit(eventName, payload) {
+      for (const callback of this.listeners.get(eventName) ?? []) {
+        try {
+          callback(payload);
+        } catch (error) {
+          console.error("Watch Home listener failed", error);
+        }
+      }
+    }
+
+    getWatchId() {
+      const match = window.location.pathname.match(/^\/watch\/(\d+)/);
+      return match?.[1] ?? null;
+    }
+
+    getVideo() {
+      this.attachCurrentVideo();
+      return this.video;
+    }
+
+    getState(modeOverride = null) {
+      const video = this.getVideo();
+      if (!video || !this.getWatchId()) {
+        return null;
+      }
+
+      return {
+        watchId: this.getWatchId(),
+        position: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+        playbackRate: Number.isFinite(video.playbackRate)
+          ? video.playbackRate
+          : 1,
+        mode: modeOverride ?? (video.paused ? "paused" : "playing")
+      };
+    }
+
+    async play() {
+      const video = this.getVideo();
+      if (!video) {
+        throw new Error("Netflix video element is not available.");
+      }
+
+      await video.play();
+    }
+
+    pause() {
+      const video = this.getVideo();
+      if (!video) {
+        return;
+      }
+
+      video.pause();
+    }
+
+    seek(positionSeconds) {
+      const video = this.getVideo();
+      if (!video || !Number.isFinite(positionSeconds)) {
+        return;
+      }
+
+      const duration = Number.isFinite(video.duration) ? video.duration : null;
+      const upperBound = duration === null
+        ? Math.max(0, positionSeconds)
+        : Math.max(0, duration - 0.05);
+
+      video.currentTime = Math.min(
+        Math.max(0, positionSeconds),
+        upperBound
+      );
+    }
+
+    setPlaybackRate(playbackRate) {
+      const video = this.getVideo();
+      if (!video || !Number.isFinite(playbackRate)) {
+        return;
+      }
+
+      const safeRate = Math.min(4, Math.max(0.25, playbackRate));
+      if (Math.abs(video.playbackRate - safeRate) > 0.002) {
+        video.playbackRate = safeRate;
+      }
+    }
+
+    attachCurrentVideo() {
+      const nextVideo = document.querySelector("video");
+      if (nextVideo === this.video) {
+        return;
+      }
+
+      this.detachVideo();
+      this.video = nextVideo;
+
+      if (!this.video) {
+        return;
+      }
+
+      const eventNames = [
+        "play",
+        "pause",
+        "playing",
+        "waiting",
+        "seeking",
+        "seeked",
+        "ratechange",
+        "loadedmetadata",
+        "emptied"
+      ];
+
+      for (const eventName of eventNames) {
+        const forwarder = (event) => {
+          this.emit(eventName, {
+            event,
+            video: this.video
+          });
+        };
+
+        this.boundForwarders.set(eventName, forwarder);
+        this.video.addEventListener(eventName, forwarder);
+      }
+
+      this.emit("videochange", { video: this.video });
+    }
+
+    detachVideo() {
+      if (!this.video) {
+        return;
+      }
+
+      for (const [eventName, forwarder] of this.boundForwarders) {
+        this.video.removeEventListener(eventName, forwarder);
+      }
+
+      this.boundForwarders.clear();
+      this.video = null;
+    }
+  }
+
+  globalThis.NetflixPlayerAdapter = NetflixPlayerAdapter;
+})();
+
+===== extension/popup/popup.css =====
+:root {
+  color-scheme: light dark;
+  font: menu;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 310px;
+  background: Canvas;
+  color: CanvasText;
+}
+
+main {
+  padding: 16px;
+}
+
+header {
+  margin-bottom: 16px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+#subtitle {
+  margin: 4px 0 0;
+  opacity: 0.72;
+}
+
+button,
+input {
+  width: 100%;
+  min-height: 38px;
+  border-radius: 7px;
+  font: inherit;
+}
+
+button {
+  border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+  background: ButtonFace;
+  color: ButtonText;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+button.primary {
+  font-weight: 650;
+}
+
+button.danger {
+  margin-top: 14px;
+}
+
+label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+input {
+  border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+  padding: 7px 10px;
+  background: Field;
+  color: FieldText;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 15px 0;
+  opacity: 0.65;
+  font-size: 12px;
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid currentColor;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+
+#status-dot.connected {
+  opacity: 1;
+}
+
+.room-panel {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+  border-radius: 7px;
+}
+
+#room-code {
+  letter-spacing: 1px;
+}
+
+#role-text,
+#participants-text {
+  margin: 10px 0 0;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+#message {
+  min-height: 18px;
+  margin: 12px 0 0;
+  font-size: 12px;
+}
+
+#message.error {
+  font-weight: 650;
+}
+
+===== extension/popup/popup.html =====
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Watch Home</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Watch Home</h1>
+        <p id="subtitle">Private Netflix watch party</p>
+      </header>
+
+      <section id="idle-view">
+        <button id="create-button" class="primary" type="button">
+          Create party
+        </button>
+
+        <div class="divider"><span>or join</span></div>
+
+        <label for="room-input">Room code</label>
+        <input
+          id="room-input"
+          type="text"
+          inputmode="text"
+          maxlength="14"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="ABCD-EFGH-JKLM"
+        >
+        <button id="join-button" type="button">Join party</button>
+      </section>
+
+      <section id="session-view" hidden>
+        <div class="status-row">
+          <span id="status-dot" aria-hidden="true"></span>
+          <strong id="status-text">Connecting</strong>
+        </div>
+
+        <div class="room-panel">
+          <span>Room</span>
+          <strong id="room-code"></strong>
+        </div>
+
+        <p id="role-text"></p>
+        <p id="participants-text"></p>
+
+        <button id="copy-button" class="primary" type="button">
+          Copy invite
+        </button>
+        <button id="open-correct-button" type="button" hidden>
+          Open correct Netflix video
+        </button>
+        <button id="reconnect-button" type="button" hidden>
+          Reconnect
+        </button>
+        <button id="leave-button" class="danger" type="button">
+          Leave party
+        </button>
+      </section>
+
+      <p id="message" role="status"></p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
+
+===== extension/popup/popup.js =====
+"use strict";
+
+const idleView = document.querySelector("#idle-view");
+const sessionView = document.querySelector("#session-view");
+const roomInput = document.querySelector("#room-input");
+const createButton = document.querySelector("#create-button");
+const joinButton = document.querySelector("#join-button");
+const copyButton = document.querySelector("#copy-button");
+const leaveButton = document.querySelector("#leave-button");
+const reconnectButton = document.querySelector("#reconnect-button");
+const openCorrectButton = document.querySelector("#open-correct-button");
+const roomCode = document.querySelector("#room-code");
+const statusText = document.querySelector("#status-text");
+const statusDot = document.querySelector("#status-dot");
+const roleText = document.querySelector("#role-text");
+const participantsText = document.querySelector("#participants-text");
+const messageBox = document.querySelector("#message");
+
+let status = null;
+
+createButton.addEventListener("click", async () => {
+  setBusy(true);
+  const response = await send({ type: "POPUP_CREATE" });
+  setBusy(false);
+
+  if (!response?.ok) {
+    showMessage(response?.error ?? "Could not create the party.", true);
+    return;
+  }
+
+  await refresh();
+});
+
+joinButton.addEventListener("click", async () => {
+  setBusy(true);
+  const response = await send({
+    type: "POPUP_JOIN",
+    roomId: roomInput.value
+  });
+  setBusy(false);
+
+  if (!response?.ok) {
+    showMessage(response?.error ?? "Could not join the party.", true);
+    return;
+  }
+
+  await refresh();
+});
+
+leaveButton.addEventListener("click", async () => {
+  setBusy(true);
+  await send({ type: "POPUP_LEAVE" });
+  setBusy(false);
+  await refresh();
+});
+
+reconnectButton.addEventListener("click", async () => {
+  setBusy(true);
+  await send({ type: "POPUP_RECONNECT" });
+  setBusy(false);
+  await refresh();
+});
+
+openCorrectButton.addEventListener("click", async () => {
+  await send({ type: "POPUP_OPEN_CORRECT" });
+});
+
+copyButton.addEventListener("click", async () => {
+  if (!status?.invite) {
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(status.invite);
+    showMessage("Invite copied.");
+  } catch {
+    showMessage("Could not copy automatically.", true);
+  }
+});
+
+roomInput.addEventListener("input", () => {
+  const cleaned = roomInput.value
+    .toUpperCase()
+    .replace(/[^23456789ABCDEFGHJKMNPQRSTUVWXYZ]/g, "")
+    .slice(0, 12);
+
+  roomInput.value = cleaned.match(/.{1,4}/g)?.join("-") ?? "";
+});
+
+async function refresh() {
+  status = await send({ type: "POPUP_GET_STATUS" });
+  render();
+}
+
+function render() {
+  const activeSession = status?.session ?? null;
+
+  idleView.hidden = Boolean(activeSession);
+  sessionView.hidden = !activeSession;
+  showMessage("");
+
+  if (!activeSession) {
+    return;
+  }
+
+  roomCode.textContent = status.roomIdFormatted ?? "";
+  statusText.textContent = statusLabel(activeSession.status);
+  statusDot.classList.toggle("connected", activeSession.connected);
+  roleText.textContent =
+    activeSession.role === "host"
+      ? "You are the host. Your playback controls the party."
+      : "You are a guest. Playback follows the host.";
+  participantsText.textContent =
+    status.participantCount > 0
+      ? `${status.participantCount} participant${
+          status.participantCount === 1 ? "" : "s"
+        } connected`
+      : "Waiting for connection";
+
+  reconnectButton.hidden = ![
+    "disconnected",
+    "error",
+    "configuration-error"
+  ].includes(activeSession.status);
+
+  openCorrectButton.hidden = !status.mismatch;
+
+  if (status.mismatch) {
+    showMessage("This party is watching a different Netflix video.", true);
+  } else if (activeSession.lastError) {
+    showMessage(activeSession.lastError, true);
+  }
+}
+
+function statusLabel(value) {
+  switch (value) {
+    case "connected":
+      return "Connected";
+    case "connecting":
+      return "Connecting…";
+    case "configuration-error":
+      return "Setup required";
+    case "error":
+      return "Connection error";
+    default:
+      return "Disconnected";
+  }
+}
+
+function setBusy(busy) {
+  for (const button of [
+    createButton,
+    joinButton,
+    leaveButton,
+    reconnectButton,
+    openCorrectButton
+  ]) {
+    button.disabled = busy;
+  }
+}
+
+function showMessage(message, isError = false) {
+  messageBox.textContent = message;
+  messageBox.classList.toggle("error", isError);
+}
+
+async function send(message) {
+  try {
+    return await browser.runtime.sendMessage(message);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message
+    };
+  }
+}
+
+void refresh();
+window.setInterval(refresh, 1000);
+
+===== extension/shared/protocol.js =====
+"use strict";
+
+(() => {
+  const ROOM_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+  const ROOM_LENGTH = 12;
+  const ROOM_PATTERN = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{12}$/;
+
+  const MessageType = Object.freeze({
+    CONTENT_READY: "CONTENT_READY",
+    SESSION: "SESSION",
+    CLOCK: "CLOCK",
+    HOST_STATE: "HOST_STATE",
+    REQUEST_STATE: "REQUEST_STATE",
+    ROOM_STATE: "ROOM_STATE",
+    HOST_OFFLINE: "HOST_OFFLINE",
+    PRESENCE: "PRESENCE",
+    PLAYER_ERROR: "PLAYER_ERROR",
+    PING: "PING",
+    PONG: "PONG",
+    WELCOME: "WELCOME",
+    ERROR: "ERROR",
+    LEAVE: "LEAVE"
+  });
+
+  function normalizeRoomId(value) {
+    return String(value ?? "")
+      .toUpperCase()
+      .replace(/[^23456789ABCDEFGHJKMNPQRSTUVWXYZ]/g, "")
+      .slice(0, ROOM_LENGTH);
+  }
+
+  function formatRoomId(value) {
+    const normalized = normalizeRoomId(value);
+    return normalized.match(/.{1,4}/g)?.join("-") ?? "";
+  }
+
+  function isValidRoomId(value) {
+    return ROOM_PATTERN.test(normalizeRoomId(value));
+  }
+
+  function createRoomId() {
+    const bytes = new Uint8Array(ROOM_LENGTH);
+    crypto.getRandomValues(bytes);
+    let output = "";
+
+    for (const byte of bytes) {
+      output += ROOM_ALPHABET[byte % ROOM_ALPHABET.length];
+    }
+
+    return output;
+  }
+
+  function createClientId() {
+    return crypto.randomUUID();
+  }
+
+  globalThis.WatchHomeProtocol = Object.freeze({
+    MessageType,
+    ROOM_PATTERN,
+    createClientId,
+    createRoomId,
+    formatRoomId,
+    isValidRoomId,
+    normalizeRoomId
+  });
+})();
+
+===== extension/sync-controller.js =====
+"use strict";
+
+(() => {
+  const DEFAULT_PLAY_LATENCY_MS = 180;
+  const DEFAULT_SEEK_LATENCY_MS = 220;
+
+  class SyncController {
+    constructor(player, onError) {
+      this.player = player;
+      this.onError = onError;
+      this.latestState = null;
+      this.clockOffsetMs = 0;
+      this.tickTimer = null;
+      this.remoteActionUntil = 0;
+      this.hardCorrectionCooldownUntil = 0;
+      this.correctionActive = false;
+      this.withinExitBandSince = null;
+      this.playLatencyMs = DEFAULT_PLAY_LATENCY_MS;
+      this.seekLatencyMs = DEFAULT_SEEK_LATENCY_MS;
+      this.pendingPlayStartedAt = null;
+      this.pendingSeekStartedAt = null;
+
+      this.player.on("playing", () => this.observePlaying());
+      this.player.on("seeked", () => this.observeSeeked());
+    }
+
+    start() {
+      if (this.tickTimer !== null) {
+        return;
+      }
+
+      this.tickTimer = window.setInterval(() => this.tick(), 250);
+    }
+
+    stop() {
+      if (this.tickTimer !== null) {
+        window.clearInterval(this.tickTimer);
+        this.tickTimer = null;
+      }
+
+      this.latestState = null;
+      this.restoreCanonicalRate();
+    }
+
+    applyRoomState(state, clockOffsetMs) {
+      if (!state) {
+        return;
+      }
+
+      this.latestState = state;
+      this.clockOffsetMs = Number.isFinite(clockOffsetMs)
+        ? clockOffsetMs
+        : this.clockOffsetMs;
+      this.tick(true);
+    }
+
+    updateClockOffset(clockOffsetMs) {
+      if (Number.isFinite(clockOffsetMs)) {
+        this.clockOffsetMs = clockOffsetMs;
+      }
+    }
+
+    reapplyNow() {
+      this.tick(true);
+    }
+
+    isSuppressingLocalEvents() {
+      return performance.now() < this.remoteActionUntil;
+    }
+
+    predictPosition(state, additionalLatencyMs = 0) {
+      if (!state) {
+        return 0;
+      }
+
+      if (state.mode !== "playing") {
+        return state.position;
+      }
+
+      const estimatedServerNow = Date.now() + this.clockOffsetMs;
+      const elapsedMs = Math.max(
+        0,
+        estimatedServerNow + additionalLatencyMs - state.anchorServerTime
+      );
+
+      return state.position + (elapsedMs / 1000) * state.playbackRate;
+    }
+
+    tick(force = false) {
+      const state = this.latestState;
+      const video = this.player.getVideo();
+
+      if (!state || !video) {
+        return;
+      }
+
+      if (state.watchId !== this.player.getWatchId()) {
+        return;
+      }
+
+      if (state.mode === "playing") {
+        this.synchronizePlaying(video, state, force);
+        return;
+      }
+
+      this.synchronizeStopped(video, state);
+    }
+
+    synchronizePlaying(video, state, force) {
+      const targetNow = this.predictPosition(state);
+      const driftSeconds = targetNow - video.currentTime;
+      const absoluteDrift = Math.abs(driftSeconds);
+
+      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        return;
+      }
+
+      if (
+        performance.now() >= this.hardCorrectionCooldownUntil &&
+        (video.paused || absoluteDrift > 1.5)
+      ) {
+        this.performPredictiveRecovery(state, video);
+        return;
+      }
+
+      if (video.paused) {
+        this.requestPlay();
+        return;
+      }
+
+      if (absoluteDrift < 0.07) {
+        if (this.withinExitBandSince === null) {
+          this.withinExitBandSince = performance.now();
+        }
+
+        if (
+          this.correctionActive &&
+          performance.now() - this.withinExitBandSince >= 1000
+        ) {
+          this.restoreCanonicalRate();
+        }
+        return;
+      }
+
+      this.withinExitBandSince = null;
+
+      if (absoluteDrift < 0.12 && !force) {
+        return;
+      }
+
+      const correction = this.correctionMagnitude(absoluteDrift);
+      const direction = Math.sign(driftSeconds);
+      const targetRate = state.playbackRate * (1 + direction * correction);
+
+      this.remoteActionUntil = performance.now() + 300;
+      this.player.setPlaybackRate(targetRate);
+      this.correctionActive = true;
+    }
+
+    synchronizeStopped(video, state) {
+      const target = state.position;
+      const driftSeconds = target - video.currentTime;
+
+      this.restoreCanonicalRate();
+
+      if (!video.paused) {
+        this.remoteActionUntil = performance.now() + 300;
+        this.player.pause();
+      }
+
+      if (Math.abs(driftSeconds) > 0.08) {
+        this.remoteActionUntil = performance.now() + 500;
+        this.pendingSeekStartedAt = performance.now();
+        this.player.seek(target);
+      }
+    }
+
+    correctionMagnitude(absoluteDrift) {
+      if (absoluteDrift < 0.4) {
+        return 0.025;
+      }
+
+      if (absoluteDrift < 0.9) {
+        return 0.05;
+      }
+
+      return 0.075;
+    }
+
+    performPredictiveRecovery(state, video) {
+      const expectedLatencyMs = Math.max(
+        100,
+        Math.min(700, this.seekLatencyMs + (video.paused ? this.playLatencyMs : 0))
+      );
+      const predictiveTarget = this.predictPosition(state, expectedLatencyMs);
+
+      this.remoteActionUntil = performance.now() + 1200;
+      this.hardCorrectionCooldownUntil = performance.now() + 1200;
+      this.pendingSeekStartedAt = performance.now();
+
+      if (Math.abs(predictiveTarget - video.currentTime) > 0.08) {
+        this.player.seek(predictiveTarget);
+      }
+
+      this.restoreCanonicalRate();
+
+      if (video.paused) {
+        this.requestPlay();
+      }
+    }
+
+    async requestPlay() {
+      this.remoteActionUntil = performance.now() + 800;
+      this.pendingPlayStartedAt = performance.now();
+
+      try {
+        await this.player.play();
+      } catch (error) {
+        this.onError?.(
+          "Firefox blocked remote playback. Click Play once in Netflix, then retry."
+        );
+        console.warn("Watch Home could not start playback", error);
+      }
+    }
+
+    observePlaying() {
+      if (this.pendingPlayStartedAt === null) {
+        return;
+      }
+
+      const sample = performance.now() - this.pendingPlayStartedAt;
+      this.playLatencyMs = this.ema(this.playLatencyMs, sample);
+      this.pendingPlayStartedAt = null;
+    }
+
+    observeSeeked() {
+      if (this.pendingSeekStartedAt === null) {
+        return;
+      }
+
+      const sample = performance.now() - this.pendingSeekStartedAt;
+      this.seekLatencyMs = this.ema(this.seekLatencyMs, sample);
+      this.pendingSeekStartedAt = null;
+    }
+
+    ema(previous, sample) {
+      const bounded = Math.max(20, Math.min(1500, sample));
+      return previous * 0.75 + bounded * 0.25;
+    }
+
+    restoreCanonicalRate() {
+      if (!this.latestState) {
+        return;
+      }
+
+      this.remoteActionUntil = performance.now() + 250;
+      this.player.setPlaybackRate(this.latestState.playbackRate);
+      this.correctionActive = false;
+      this.withinExitBandSince = null;
+    }
+  }
+
+  globalThis.WatchHomeSyncController = SyncController;
+})();
+
+===== package.json =====
+{
+  "name": "watch-home",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Private Firefox watch-party synchronization extension and Cloudflare Worker.",
+  "scripts": {
+    "configure": "node scripts/configure.mjs",
+    "dev:worker": "wrangler dev",
+    "deploy:worker": "wrangler deploy",
+    "lint:addon": "web-ext lint --source-dir extension",
+    "build:addon": "web-ext build --source-dir extension --artifacts-dir artifacts --overwrite-dest",
+    "test": "node --test tests/*.test.mjs",
+    "verify:release": "node scripts/verify-release.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "web-ext": "10.6.0",
+    "wrangler": "4.131.2"
+  }
+}
+
+===== scripts/configure.mjs =====
+import fs from "node:fs/promises";
+import path from "node:path";
+
+const root = process.cwd();
+const backend = readArgument("--backend");
+
+if (!backend) {
+  fail(
+    "Usage: npm run configure -- --backend https://watch-home.YOUR-SUBDOMAIN.workers.dev"
+  );
+}
+
+let backendUrl;
+try {
+  backendUrl = new URL(backend);
+} catch {
+  fail("The backend must be a valid HTTPS URL.");
+}
+
+if (
+  backendUrl.protocol !== "https:" ||
+  backendUrl.pathname !== "/" ||
+  backendUrl.search ||
+  backendUrl.hash
+) {
+  fail("Use only the HTTPS backend origin, with no path/query/hash.");
+}
+
+const httpOrigin = backendUrl.origin;
+const wsOrigin = `wss://${backendUrl.host}`;
+
+const configPath = path.join(root, "extension", "config.js");
+const configText = `"use strict";
+
+globalThis.WatchHomeConfig = Object.freeze({
+  backendHttpOrigin: ${JSON.stringify(httpOrigin)},
+  backendWsOrigin: ${JSON.stringify(wsOrigin)},
+  heartbeatIntervalMs: 2500,
+  clockSyncIntervalMs: 10000,
+  hostStallDebounceMs: 200,
+  reconnectBaseMs: 500,
+  reconnectMaxMs: 10000
+});
+`;
+
+await fs.writeFile(configPath, configText, "utf8");
+
+const manifestPath = path.join(root, "extension", "manifest.json");
+const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+
+manifest.host_permissions = manifest.host_permissions.filter(
+  (value) =>
+    !value.includes("example.workers.dev") &&
+    !/https:\/\/[^/]+\.workers\.dev\/\*/.test(value)
+);
+
+manifest.host_permissions.push(`${httpOrigin}/*`);
+
+await fs.writeFile(
+  manifestPath,
+  `${JSON.stringify(manifest, null, 2)}\n`,
+  "utf8"
+);
+
+console.log(`Configured extension backend: ${httpOrigin}`);
+
+function readArgument(name) {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : null;
+}
+
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+===== scripts/generate-update-manifest.mjs =====
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+
+const [version, xpiPath, updateLink] = process.argv.slice(2);
+
+if (!version || !xpiPath || !updateLink) {
+  console.error(
+    "Usage: node scripts/generate-update-manifest.mjs <version> <xpi-path> <https-update-link>"
+  );
+  process.exit(1);
+}
+
+const xpi = await fs.readFile(xpiPath);
+const sha256 = crypto.createHash("sha256").update(xpi).digest("hex");
+
+const manifest = {
+  addons: {
+    "watch-home@Kvazac": {
+      updates: [
+        {
+          version,
+          update_link: updateLink,
+          update_hash: `sha256:${sha256}`
+        }
+      ]
+    }
+  }
+};
+
+process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
+
+===== scripts/verify-release.mjs =====
+import fs from "node:fs/promises";
+
+const expectedVersion = process.argv[2];
+
+if (!expectedVersion) {
+  console.error("Usage: node scripts/verify-release.mjs <version>");
+  process.exit(1);
+}
+
+const manifest = JSON.parse(
+  await fs.readFile("extension/manifest.json", "utf8")
+);
+const config = await fs.readFile("extension/config.js", "utf8");
+
+if (manifest.version !== expectedVersion) {
+  console.error(
+    `Manifest version ${manifest.version} does not match requested release ${expectedVersion}.`
+  );
+  process.exit(1);
+}
+
+if (config.includes("example.workers.dev")) {
+  console.error(
+    "Production backend is still the placeholder example.workers.dev."
+  );
+  process.exit(1);
+}
+
+const updateUrl =
+  manifest.browser_specific_settings?.gecko?.update_url;
+
+if (updateUrl !== "https://kvazac.github.io/Watch-Home/updates.json") {
+  console.error(`Unexpected update_url: ${updateUrl}`);
+  process.exit(1);
+}
+
+if (
+  manifest.browser_specific_settings?.gecko?.id !==
+  "watch-home@Kvazac"
+) {
+  console.error("Unexpected Firefox extension ID.");
+  process.exit(1);
+}
+
+console.log(`Release verification passed for ${expectedVersion}.`);
+
+===== site/index.html =====
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Watch Home</title>
+  </head>
+  <body>
+    <main>
+      <h1>Watch Home</h1>
+      <p>
+        Private Firefox watch-party synchronization extension.
+      </p>
+      <p>
+        Install signed releases from
+        <a href="https://github.com/Kvazac/Watch-Home/releases/latest">
+          GitHub Releases
+        </a>.
+      </p>
+      <p>
+        <a href="privacy.html">Privacy notice</a>
+      </p>
+    </main>
+  </body>
+</html>
+
+===== site/privacy.html =====
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Watch Home Privacy</title>
+  </head>
+  <body>
+    <main>
+      <h1>Watch Home Privacy</h1>
+      <p>
+        Watch Home transmits only the active room identifier, Netflix watch
+        identifier, playback position/state/rate, synchronization timestamps,
+        sequence numbers, and a random reconnect client identifier needed to
+        coordinate an active watch party.
+      </p>
+      <p>
+        It does not intentionally collect Netflix credentials, Netflix cookies,
+        real names, email addresses, audio/video content, subtitles,
+        advertising identifiers, analytics identifiers, unrelated browsing
+        history, or search terms.
+      </p>
+      <p>
+        See the full
+        <a href="https://github.com/Kvazac/Watch-Home/blob/main/PRIVACY.md">
+          repository privacy notice
+        </a>.
+      </p>
+    </main>
+  </body>
+</html>
+
+===== site/updates.json =====
+{
+  "addons": {}
+}
+
+===== tests/validation.test.mjs =====
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  clampAnchorTime,
+  freezeCanonicalState,
+  isValidClientId,
+  isValidRoomId,
+  sanitizeHostState
+} from "../worker/src/validation.js";
+
+test("room IDs accept the intended 12-character alphabet", () => {
+  assert.equal(isValidRoomId("2345ABCDJKMP"), true);
+  assert.equal(isValidRoomId("1235ABCDJKMP"), false);
+  assert.equal(isValidRoomId("2345ABCDJKM"), false);
+});
+
+test("client IDs require UUID v4", () => {
+  assert.equal(
+    isValidClientId("550e8400-e29b-41d4-a716-446655440000"),
+    true
+  );
+  assert.equal(isValidClientId("not-a-uuid"), false);
+});
+
+test("host state validation rejects unsafe values", () => {
+  assert.deepEqual(
+    sanitizeHostState({
+      watchId: "81234567",
+      position: 120.5,
+      playbackRate: 1,
+      mode: "playing"
+    }),
+    {
+      watchId: "81234567",
+      position: 120.5,
+      playbackRate: 1,
+      mode: "playing"
+    }
+  );
+
+  assert.equal(
+    sanitizeHostState({
+      watchId: "bad",
+      position: 120,
+      playbackRate: 1,
+      mode: "playing"
+    }),
+    null
+  );
+});
+
+test("anchor time accepts reasonable client clock estimates", () => {
+  assert.equal(clampAnchorTime(10_100, 10_000), 10_100);
+  assert.equal(clampAnchorTime(20_000, 10_000), 10_000);
+});
+
+test("disconnect freezes a playing canonical timeline", () => {
+  const frozen = freezeCanonicalState(
+    {
+      watchId: "81234567",
+      position: 100,
+      playbackRate: 1,
+      mode: "playing",
+      anchorServerTime: 10_000,
+      sequence: 5
+    },
+    12_500
+  );
+
+  assert.equal(frozen.mode, "offline");
+  assert.equal(frozen.position, 102.5);
+  assert.equal(frozen.anchorServerTime, 12_500);
+});
+
+===== worker/src/index.js =====
+import { PartyRoom } from "./party-room.js";
+import { isValidRoomId } from "./validation.js";
+
+export { PartyRoom };
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (request.method === "GET" && url.pathname === "/health") {
+      return Response.json({
+        ok: true,
+        service: "watch-home",
+        protocol: 1
+      });
+    }
+
+    const match = url.pathname.match(/^\/ws\/([^/]+)$/);
+    if (!match || request.method !== "GET") {
+      return new Response("Not found.", { status: 404 });
+    }
+
+    const roomId = match[1];
+    if (!isValidRoomId(roomId)) {
+      return new Response("Invalid room ID.", { status: 400 });
+    }
+
+    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("Expected a WebSocket upgrade.", { status: 426 });
+    }
+
+    const id = env.PARTY_ROOM.idFromName(roomId);
+    const stub = env.PARTY_ROOM.get(id);
+
+    return stub.fetch(request);
+  }
+};
+
+===== worker/src/party-room.js =====
+import { DurableObject } from "cloudflare:workers";
+
+import {
+  clampAnchorTime,
+  freezeCanonicalState,
+  isValidClientId,
+  sanitizeHostState
+} from "./validation.js";
+
+const MAX_CONNECTIONS = 12;
+const MAX_MESSAGE_BYTES = 16 * 1024;
+
+export class PartyRoom extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.room = {
+      hostClientId: null,
+      canonical: null,
+      sequence: 0
+    };
+
+    this.ctx.blockConcurrencyWhile(async () => {
+      const stored = await this.ctx.storage.get("room");
+      if (stored) {
+        this.room = stored;
+      }
+    });
+  }
+
+  async fetch(request) {
+    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("Expected a WebSocket upgrade.", { status: 426 });
+    }
+
+    const url = new URL(request.url);
+    const desiredRole = url.searchParams.get("role");
+    const clientId = url.searchParams.get("clientId");
+
+    if (!["host", "guest"].includes(desiredRole) || !isValidClientId(clientId)) {
+      return new Response("Invalid connection parameters.", { status: 400 });
+    }
+
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    if (this.openSockets().length >= MAX_CONNECTIONS) {
+      server.accept();
+      server.send(
+        JSON.stringify({
+          type: "ERROR",
+          message: "This room is full."
+        })
+      );
+      server.close(4008, "Room full");
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client
+      });
+    }
+
+    const assignedRole = await this.assignRole(desiredRole, clientId);
+    if (!assignedRole) {
+      server.accept();
+      server.send(
+        JSON.stringify({
+          type: "ERROR",
+          message:
+            desiredRole === "host"
+              ? "This room already has a different host."
+              : "The host has not created this room yet."
+        })
+      );
+      server.close(4003, "Role rejected");
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client
+      });
+    }
+
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment({
+      clientId,
+      role: assignedRole
+    });
+
+    this.send(server, {
+      type: "WELCOME",
+      role: assignedRole,
+      state: this.room.canonical,
+      participantCount: this.openSockets().length,
+      serverTime: Date.now()
+    });
+
+    this.broadcastPresence();
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
+  }
+
+  async webSocketMessage(webSocket, rawMessage) {
+    if (
+      typeof rawMessage !== "string" ||
+      new TextEncoder().encode(rawMessage).byteLength > MAX_MESSAGE_BYTES
+    ) {
+      this.send(webSocket, {
+        type: "ERROR",
+        message: "Invalid message."
+      });
+      return;
+    }
+
+    let message;
+    try {
+      message = JSON.parse(rawMessage);
+    } catch {
+      return;
+    }
+
+    const attachment = webSocket.deserializeAttachment() ?? {};
+
+    switch (message.type) {
+      case "PING":
+        this.send(webSocket, {
+          type: "PONG",
+          clientSentAt: message.clientSentAt,
+          serverTime: Date.now()
+        });
+        break;
+
+      case "REQUEST_STATE":
+        if (this.room.canonical) {
+          this.send(webSocket, {
+            type: "ROOM_STATE",
+            state: this.room.canonical
+          });
+        }
+        break;
+
+      case "HOST_STATE":
+        if (
+          attachment.role !== "host" ||
+          attachment.clientId !== this.room.hostClientId
+        ) {
+          return;
+        }
+
+        await this.updateCanonicalState(message);
+        break;
+
+      case "LEAVE":
+        webSocket.close(1000, "Client left");
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  async webSocketClose(webSocket) {
+    await this.handleSocketGone(webSocket);
+  }
+
+  async webSocketError(webSocket) {
+    await this.handleSocketGone(webSocket);
+  }
+
+  async assignRole(desiredRole, clientId) {
+    if (desiredRole === "host") {
+      if (
+        this.room.hostClientId &&
+        this.room.hostClientId !== clientId
+      ) {
+        return null;
+      }
+
+      if (!this.room.hostClientId) {
+        this.room.hostClientId = clientId;
+        await this.persistRoom();
+      }
+
+      return "host";
+    }
+
+    if (!this.room.hostClientId) {
+      return null;
+    }
+
+    return "guest";
+  }
+
+  async updateCanonicalState(message) {
+    const sanitized = sanitizeHostState(message.state);
+    if (!sanitized) {
+      return;
+    }
+
+    const serverNow = Date.now();
+    const anchorServerTime = clampAnchorTime(
+      message.estimatedServerTime,
+      serverNow
+    );
+
+    this.room.sequence += 1;
+    this.room.canonical = {
+      ...sanitized,
+      anchorServerTime,
+      sequence: this.room.sequence
+    };
+
+    await this.persistRoom();
+
+    this.broadcast({
+      type: "ROOM_STATE",
+      state: this.room.canonical
+    });
+  }
+
+  async handleSocketGone(webSocket) {
+    const attachment = webSocket.deserializeAttachment() ?? {};
+
+    if (
+      attachment.role === "host" &&
+      attachment.clientId === this.room.hostClientId
+    ) {
+      const serverNow = Date.now();
+      this.room.canonical = freezeCanonicalState(
+        this.room.canonical,
+        serverNow
+      );
+
+      if (this.room.canonical) {
+        this.room.sequence += 1;
+        this.room.canonical.sequence = this.room.sequence;
+      }
+
+      await this.persistRoom();
+
+      this.broadcast({
+        type: "HOST_OFFLINE",
+        state: this.room.canonical
+      });
+    }
+
+    const remaining = this.openSockets(webSocket);
+
+    if (remaining.length === 0) {
+      await this.ctx.storage.deleteAll();
+      this.room = {
+        hostClientId: null,
+        canonical: null,
+        sequence: 0
+      };
+      return;
+    }
+
+    this.broadcastPresence();
+  }
+
+  broadcastPresence() {
+    this.broadcast({
+      type: "PRESENCE",
+      participantCount: this.openSockets().length
+    });
+  }
+
+  openSockets(excluded = null) {
+    return this.ctx
+      .getWebSockets()
+      .filter(
+        (webSocket) =>
+          webSocket !== excluded &&
+          webSocket.readyState === 1
+      );
+  }
+
+  broadcast(payload) {
+    for (const webSocket of this.openSockets()) {
+      this.send(webSocket, payload);
+    }
+  }
+
+  send(webSocket, payload) {
+    try {
+      webSocket.send(JSON.stringify(payload));
+    } catch {
+      // A closing socket can disappear between enumeration and send.
+    }
+  }
+
+  async persistRoom() {
+    await this.ctx.storage.put("room", this.room);
+  }
+}
+
+===== worker/src/validation.js =====
+const ROOM_PATTERN = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{12}$/;
+const CLIENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MODES = new Set(["playing", "paused", "stalled", "offline"]);
+
+export function isValidRoomId(roomId) {
+  return ROOM_PATTERN.test(String(roomId ?? ""));
+}
+
+export function isValidClientId(clientId) {
+  return CLIENT_ID_PATTERN.test(String(clientId ?? ""));
+}
+
+export function sanitizeHostState(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const watchId = String(value.watchId ?? "");
+  const position = Number(value.position);
+  const playbackRate = Number(value.playbackRate);
+  const mode = String(value.mode ?? "");
+
+  if (!/^\d{1,32}$/.test(watchId)) {
+    return null;
+  }
+
+  if (!Number.isFinite(position) || position < 0 || position > 86400) {
+    return null;
+  }
+
+  if (
+    !Number.isFinite(playbackRate) ||
+    playbackRate < 0.25 ||
+    playbackRate > 4
+  ) {
+    return null;
+  }
+
+  if (!MODES.has(mode)) {
+    return null;
+  }
+
+  return {
+    watchId,
+    position,
+    playbackRate,
+    mode
+  };
+}
+
+export function clampAnchorTime(estimatedServerTime, serverNow) {
+  const candidate = Number(estimatedServerTime);
+
+  if (!Number.isFinite(candidate)) {
+    return serverNow;
+  }
+
+  if (Math.abs(candidate - serverNow) > 2000) {
+    return serverNow;
+  }
+
+  return candidate;
+}
+
+export function freezeCanonicalState(canonicalState, serverNow) {
+  if (!canonicalState) {
+    return null;
+  }
+
+  if (canonicalState.mode !== "playing") {
+    return {
+      ...canonicalState,
+      mode: "offline",
+      anchorServerTime: serverNow
+    };
+  }
+
+  const elapsedSeconds = Math.max(
+    0,
+    (serverNow - canonicalState.anchorServerTime) / 1000
+  );
+
+  return {
+    ...canonicalState,
+    mode: "offline",
+    position:
+      canonicalState.position +
+      elapsedSeconds * canonicalState.playbackRate,
+    anchorServerTime: serverNow
+  };
+}
+
+===== wrangler.jsonc =====
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "watch-home",
+  "main": "worker/src/index.js",
+  "compatibility_date": "2026-09-14",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PARTY_ROOM",
+        "class_name": "PartyRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "PartyRoom"
+      ]
+    }
+  ]
+}

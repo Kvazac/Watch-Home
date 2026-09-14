@@ -1,0 +1,11 @@
+{
+  "summary": {
+    "en-US": "Synchronizes Netflix playback for a small private watch party."
+  },
+  "categories": [
+    "other"
+  ],
+  "version": {
+    "license": "MIT"
+  }
+}

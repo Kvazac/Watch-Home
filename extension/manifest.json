@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "Watch Home",
+  "version": "1.0.0",
+  "description": "Synchronize Netflix playback for a small private watch party.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "watch-home@Kvazac",
+      "strict_min_version": "140.0",
+      "update_url": "https://kvazac.github.io/Watch-Home/updates.json",
+      "data_collection_permissions": {
+        "required": [
+          "browsingActivity",
+          "websiteActivity"
+        ]
+      }
+    }
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.netflix.com/*",
+    "https://watch-home.example.workers.dev/*"
+  ],
+  "background": {
+    "scripts": [
+      "config.js",
+      "shared/protocol.js",
+      "background.js"
+    ],
+    "persistent": false
+  },
+  "action": {
+    "default_title": "Watch Home",
+    "default_popup": "popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.netflix.com/watch/*"
+      ],
+      "js": [
+        "shared/protocol.js",
+        "netflix-player.js",
+        "sync-controller.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "incognito": "not_allowed"
+}
