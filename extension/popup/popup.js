@@ -1,3 +1,4 @@
+// extension/popup/popup.js
 "use strict";
 
 const MESSAGE_DURATION_MS = 6000;
@@ -172,6 +173,9 @@ function render() {
   statusText.textContent = statusLabel(activeSession.status);
   statusDot.classList.toggle("connected", activeSession.connected);
 
+  roleText.textContent =
+    activeSession.role === "host"
+      ? "You are the host. Your playback controls the party."
   roleText.textContent =
     activeSession.role === "host"
       ? "You are the host. Your playback controls the party."
