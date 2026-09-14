@@ -21,7 +21,7 @@
   ],
   "host_permissions": [
     "https://www.netflix.com/*",
-    "https://watch-home.example.workers.dev/*"
+    "https://watch-home.ugnius-socials.workers.dev/*"
   ],
   "background": {
     "scripts": [

@@ -1,0 +1,54 @@
+warning: in the working copy of 'extension/config.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'extension/manifest.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'package.json', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/extension/config.js b/extension/config.js[m
+[1mindex 9bc859a..77a0e4d 100644[m
+[1m--- a/extension/config.js[m
+[1m+++ b/extension/config.js[m
+[36m@@ -1,8 +1,8 @@[m
+ "use strict";[m
+ [m
+ globalThis.WatchHomeConfig = Object.freeze({[m
+[31m-  backendHttpOrigin: "https://watch-home.example.workers.dev",[m
+[31m-  backendWsOrigin: "wss://watch-home.example.workers.dev",[m
+[32m+[m[32m  backendHttpOrigin: "https://watch-home.ugnius-socials.workers.dev",[m
+[32m+[m[32m  backendWsOrigin: "wss://watch-home.ugnius-socials.workers.dev",[m
+   heartbeatIntervalMs: 2500,[m
+   clockSyncIntervalMs: 10000,[m
+   hostStallDebounceMs: 200,[m
+[1mdiff --git a/extension/manifest.json b/extension/manifest.json[m
+[1mindex b3fc2f3..788278f 100644[m
+[1m--- a/extension/manifest.json[m
+[1m+++ b/extension/manifest.json[m
+[36m@@ -21,7 +21,7 @@[m
+   ],[m
+   "host_permissions": [[m
+     "https://www.netflix.com/*",[m
+[31m-    "https://watch-home.example.workers.dev/*"[m
+[32m+[m[32m    "https://watch-home.ugnius-socials.workers.dev/*"[m
+   ],[m
+   "background": {[m
+     "scripts": [[m
+[1mdiff --git a/package.json b/package.json[m
+[1mindex 0b85426..51eb62d 100644[m
+[1m--- a/package.json[m
+[1m+++ b/package.json[m
+[36m@@ -8,7 +8,7 @@[m
+     "configure": "node scripts/configure.mjs",[m
+     "dev:worker": "wrangler dev",[m
+     "deploy:worker": "wrangler deploy",[m
+[31m-    "lint:addon": "web-ext lint --source-dir extension",[m
+[32m+[m[32m    "lint:addon": "web-ext lint --source-dir extension --self-hosted",[m
+     "build:addon": "web-ext build --source-dir extension --artifacts-dir artifacts --overwrite-dest",[m
+     "test": "node --test tests/*.test.mjs",[m
+     "verify:release": "node scripts/verify-release.mjs"[m
+[36m@@ -19,5 +19,9 @@[m
+   "devDependencies": {[m
+     "web-ext": "10.6.0",[m
+     "wrangler": "4.131.2"[m
+[32m+[m[32m  },[m
+[32m+[m[32m  "allowScripts": {[m
+[32m+[m[32m    "esbuild@0.28.1": true,[m
+[32m+[m[32m    "workerd@1.20260911.1": true[m
+   }[m
+ }[m
