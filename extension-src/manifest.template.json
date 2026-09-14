@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "Watch Home",
+  "version": "__VERSION__",
+  "description": "Private Netflix watch-party playback synchronization for a small trusted group.",
+  "incognito": "not_allowed",
+  "permissions": [
+    "storage",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "https://www.netflix.com/*",
+    "__BACKEND_ORIGIN__/*"
+  ],
+  "action": {
+    "default_title": "Watch Home",
+    "default_popup": "popup/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.netflix.com/watch/*"
+      ],
+      "js": [
+        "config.js",
+        "netflix-player.js",
+        "sync-controller.js",
+        "party-client.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'self' __BACKEND_ORIGIN__ __BACKEND_WS_ORIGIN__"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "__EXTENSION_ID__",
+      "strict_min_version": "140.0",
+      "update_url": "__UPDATE_URL__",
+      "data_collection_permissions": {
+        "required": [
+          "browsingActivity",
+          "websiteActivity"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "watch-home",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:extension": "node scripts/build-extension.mjs",
+    "lint:extension": "npm run build:extension && web-ext lint --source-dir build/extension",
+    "run:extension": "npm run build:extension && web-ext run --source-dir build/extension",
+    "package:extension": "npm run build:extension && web-ext build --source-dir build/extension --artifacts-dir artifacts --overwrite-dest",
+    "dev:worker": "wrangler dev",
+    "deploy:worker": "wrangler deploy",
+    "check:syntax": "node --check worker/index.js && node --check extension-src/netflix-player.js && node --check extension-src/sync-controller.js && node --check extension-src/party-client.js && node --check extension-src/content.js && node --check extension-src/popup/popup.js"
+  },
+  "devDependencies": {
+    "web-ext": "10.6.0",
+    "wrangler": "4.131.2"
+  }
+}

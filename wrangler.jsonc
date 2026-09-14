@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "watch-home",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-09-14",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PARTY_ROOMS",
+        "class_name": "PartyRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "PartyRoom"
+      ]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

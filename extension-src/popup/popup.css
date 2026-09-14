@@ -1,0 +1,101 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  width: 300px;
+  margin: 0;
+  background: #141414;
+  color: #f5f5f5;
+}
+
+main {
+  padding: 16px;
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: 20px;
+}
+
+.status,
+#party-details {
+  margin: 0 0 14px;
+  color: #b9b9b9;
+  font-size: 13px;
+}
+
+button,
+input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 38px;
+  border-radius: 6px;
+  font: inherit;
+}
+
+button {
+  margin-top: 8px;
+  border: 1px solid #555;
+  background: #2a2a2a;
+  color: #fff;
+  cursor: pointer;
+}
+
+button.primary {
+  border-color: #fff;
+  background: #fff;
+  color: #111;
+  font-weight: 600;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+input {
+  margin-top: 6px;
+  border: 1px solid #555;
+  background: #1f1f1f;
+  color: #fff;
+  padding: 8px 10px;
+  text-transform: uppercase;
+}
+
+label {
+  font-size: 12px;
+  color: #cfcfcf;
+}
+
+.divider {
+  margin: 14px 0;
+  text-align: center;
+  color: #777;
+  font-size: 12px;
+}
+
+.room {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.room span {
+  color: #aaa;
+  font-size: 12px;
+}
+
+.room strong {
+  font-size: 15px;
+  letter-spacing: 0.08em;
+}
+
+.error {
+  margin: 12px 0 0;
+  color: #ff8d8d;
+  font-size: 12px;
+}
