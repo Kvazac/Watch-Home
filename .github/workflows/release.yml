@@ -1,3 +1,5 @@
+name: Sign and release Firefox extension
+
 on:
   workflow_dispatch:
     inputs:

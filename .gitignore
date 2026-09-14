@@ -1,0 +1,11 @@
+node_modules/
+web-ext-artifacts/
+signed/
+artifacts/
+.wrangler/
+.wrangler-dry-run/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
