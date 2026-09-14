@@ -1,4 +1,8 @@
+// extension/popup/popup.js
 "use strict";
+
+const MESSAGE_DURATION_MS = 6000;
+const COPY_MESSAGE_DURATION_MS = 3000;
 
 const idleView = document.querySelector("#idle-view");
 const sessionView = document.querySelector("#session-view");
@@ -17,6 +21,8 @@ const participantsText = document.querySelector("#participants-text");
 const messageBox = document.querySelector("#message");
 
 let status = null;
+let messageTimer = null;
+let transientMessageUntil = 0;
 
 createButton.addEventListener("click", async () => {
   setBusy(true);
@@ -24,10 +30,14 @@ createButton.addEventListener("click", async () => {
   setBusy(false);
 
   if (!response?.ok) {
-    showMessage(response?.error ?? "Could not create the party.", true);
+    showTransientMessage(
+      response?.error ?? "Could not create the party.",
+      true
+    );
     return;
   }
 
+  clearMessage();
   await refresh();
 });
 
@@ -40,10 +50,14 @@ joinButton.addEventListener("click", async () => {
   setBusy(false);
 
   if (!response?.ok) {
-    showMessage(response?.error ?? "Could not join the party.", true);
+    showTransientMessage(
+      response?.error ?? "Could not join the party.",
+      true
+    );
     return;
   }
 
+  clearMessage();
   await refresh();
 });
 
@@ -51,6 +65,8 @@ leaveButton.addEventListener("click", async () => {
   setBusy(true);
   await send({ type: "POPUP_LEAVE" });
   setBusy(false);
+
+  clearMessage();
   await refresh();
 });
 
@@ -58,6 +74,8 @@ reconnectButton.addEventListener("click", async () => {
   setBusy(true);
   await send({ type: "POPUP_RECONNECT" });
   setBusy(false);
+
+  clearMessage();
   await refresh();
 });
 
@@ -72,9 +90,16 @@ copyButton.addEventListener("click", async () => {
 
   try {
     await navigator.clipboard.writeText(status.invite);
-    showMessage("Invite copied.");
+    showTransientMessage(
+      "Invite copied.",
+      false,
+      COPY_MESSAGE_DURATION_MS
+    );
   } catch {
-    showMessage("Could not copy automatically.", true);
+    showTransientMessage(
+      "Could not copy automatically.",
+      true
+    );
   }
 });
 
@@ -97,19 +122,21 @@ function render() {
 
   idleView.hidden = Boolean(activeSession);
   sessionView.hidden = !activeSession;
-  showMessage("");
 
   if (!activeSession) {
+    clearPersistentMessageIfAllowed();
     return;
   }
 
   roomCode.textContent = status.roomIdFormatted ?? "";
   statusText.textContent = statusLabel(activeSession.status);
   statusDot.classList.toggle("connected", activeSession.connected);
+
   roleText.textContent =
     activeSession.role === "host"
       ? "You are the host. Your playback controls the party."
       : "You are a guest. Playback follows the host.";
+
   participantsText.textContent =
     status.participantCount > 0
       ? `${status.participantCount} participant${
@@ -126,10 +153,19 @@ function render() {
   openCorrectButton.hidden = !status.mismatch;
 
   if (status.mismatch) {
-    showMessage("This party is watching a different Netflix video.", true);
-  } else if (activeSession.lastError) {
-    showMessage(activeSession.lastError, true);
+    showPersistentMessage(
+      "This party is watching a different Netflix video.",
+      true
+    );
+    return;
   }
+
+  if (activeSession.lastError) {
+    showPersistentMessage(activeSession.lastError, true);
+    return;
+  }
+
+  clearPersistentMessageIfAllowed();
 }
 
 function statusLabel(value) {
@@ -159,7 +195,53 @@ function setBusy(busy) {
   }
 }
 
-function showMessage(message, isError = false) {
+function showTransientMessage(
+  message,
+  isError = false,
+  durationMs = MESSAGE_DURATION_MS
+) {
+  clearMessageTimer();
+
+  setMessage(message, isError);
+  transientMessageUntil = Date.now() + durationMs;
+
+  messageTimer = window.setTimeout(() => {
+    messageTimer = null;
+    transientMessageUntil = 0;
+    render();
+  }, durationMs);
+}
+
+function showPersistentMessage(message, isError = false) {
+  if (Date.now() < transientMessageUntil) {
+    return;
+  }
+
+  setMessage(message, isError);
+}
+
+function clearPersistentMessageIfAllowed() {
+  if (Date.now() < transientMessageUntil) {
+    return;
+  }
+
+  setMessage("", false);
+}
+
+function clearMessage() {
+  clearMessageTimer();
+  transientMessageUntil = 0;
+  setMessage("", false);
+}
+
+function clearMessageTimer() {
+  if (messageTimer !== null) {
+    window.clearTimeout(messageTimer);
+    messageTimer = null;
+  }
+}
+
+function setMessage(message, isError) {
   messageBox.textContent = message;
   messageBox.classList.toggle("error", isError);
 }
