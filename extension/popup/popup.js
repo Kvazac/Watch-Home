@@ -173,15 +173,12 @@ function render() {
   statusText.textContent = statusLabel(activeSession.status);
   statusDot.classList.toggle("connected", activeSession.connected);
 
-  roleText.textContent =
-    activeSession.role === "host"
-      ? "You are the host. Your playback controls the party."
-  roleText.textContent =
-    activeSession.role === "host"
-      ? "You are the host. Your playback controls the party."
-      : status.hostOnline === false
-        ? "You are a guest. Waiting for the host to reconnect."
-        : "You are a guest. Playback follows the host.";
+roleText.textContent =
+  activeSession.role === "host"
+    ? "You are the host. Your playback controls the party."
+    : status.hostOnline === false
+      ? "You are a guest. Waiting for the host to reconnect."
+      : "You are a guest. Playback follows the host.";
 
   participantsText.textContent =
     status.participantCount > 0
