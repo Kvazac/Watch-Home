@@ -45,12 +45,12 @@ export class PartyRoom extends DurableObject {
 
     if (this.openSockets().length >= MAX_CONNECTIONS) {
       server.accept();
-      server.send(
-        JSON.stringify({
-          type: "ERROR",
-          message: "This room is full."
-        })
-      );
+      this.send(server, {
+        type: "ERROR",
+        code: "ROOM_FULL",
+        retryable: false,
+        message: "This room is full."
+      });
       server.close(4008, "Room full");
 
       return new Response(null, {
@@ -62,15 +62,18 @@ export class PartyRoom extends DurableObject {
     const assignedRole = await this.assignRole(desiredRole, clientId);
     if (!assignedRole) {
       server.accept();
-      server.send(
-        JSON.stringify({
-          type: "ERROR",
-          message:
-            desiredRole === "host"
-              ? "This room already has a different host."
-              : "The host has not created this room yet."
-        })
-      );
+      this.send(server, {
+        type: "ERROR",
+        code:
+          desiredRole === "host"
+            ? "HOST_CONFLICT"
+            : "ROOM_NOT_READY",
+        retryable: false,
+        message:
+          desiredRole === "host"
+            ? "This room already has a different host."
+            : "The host is no longer available for this room."
+      });
       server.close(4003, "Role rejected");
 
       return new Response(null, {
@@ -108,6 +111,8 @@ export class PartyRoom extends DurableObject {
     ) {
       this.send(webSocket, {
         type: "ERROR",
+        code: "INVALID_MESSAGE",
+        retryable: true,
         message: "Invalid message."
       });
       return;

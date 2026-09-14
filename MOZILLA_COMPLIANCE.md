@@ -1,13 +1,12 @@
 # Mozilla Add-on Conformity Checklist
 
 This file documents the intended conformity boundary for Watch Home. It is not
-a substitute for Mozilla validation or review. A release is considered
-production-ready only after `web-ext lint` passes and Mozilla returns a signed
-XPI.
+a substitute for Mozilla validation or review. A release is production-ready
+only after local/CI checks pass and Mozilla returns a signed XPI.
 
 ## Signing
 
-- Manifest V3 has a fixed Firefox add-on ID: `watch-home@Kvazac`.
+- Manifest V3 has fixed Firefox add-on ID `watch-home@Kvazac`.
 - Production builds are submitted to Mozilla as `unlisted`.
 - Only Mozilla-signed XPI files are distributed.
 - Self-hosting does not bypass Firefox signing requirements.
@@ -15,30 +14,24 @@ XPI.
 Reference:
 https://support.mozilla.org/en-US/kb/add-on-signing-in-firefox
 
-## Distribution
+## Distribution and updates
 
-- Distribution is self-hosted through GitHub Releases.
-- The extension remains unlisted on AMO.
-- The extension uses an HTTPS self-hosted update manifest.
-- The update URL is fixed at:
+- GitHub Releases hosts signed XPI files.
+- GitHub Pages hosts the HTTPS Firefox update manifest.
+- Permanent update URL:
   `https://kvazac.github.io/Watch-Home/updates.json`
+- Every update XPI is Mozilla-signed before it is advertised.
 
 ## Permissions
 
-Required WebExtension permissions are intentionally narrow:
+Required WebExtension permissions remain narrow:
 
 - `storage` — client/session reconnection state;
-- Netflix host access — the page the extension synchronizes;
-- the configured Cloudflare Worker host — the synchronization service.
+- `https://www.netflix.com/*` — playback page synchronization;
+- exact production Worker origin — synchronization WebSocket service.
 
-The extension does not request:
-
-- cookies;
-- history;
-- bookmarks;
-- downloads;
-- all-sites access;
-- native messaging.
+The extension does not request cookies, history, bookmarks, downloads,
+`<all_urls>`, or native messaging.
 
 ## Data collection declaration
 
@@ -49,36 +42,42 @@ The manifest declares required:
 - `websiteActivity` — play/pause/seek/rate/timing interactions are transmitted
   for synchronization.
 
-The extension does not declare `none`, because synchronization requires these
-data to leave the local browser.
+Local diagnostics (drift/RTT/latency/correction counters) are not transmitted
+to Watch Home infrastructure.
 
 ## Executable code
 
-- All executable extension JavaScript is packaged inside the XPI.
+- All executable extension JavaScript ships inside the XPI.
 - No remote JavaScript is downloaded or executed.
-- No `eval` or equivalent dynamic-code loading is used.
-- Source is plain JavaScript with no minification or obfuscation.
+- `eval` and `new Function` are prohibited by automated checks.
+- Source remains readable plain JavaScript.
 
 ## Transport
 
 - Update traffic uses HTTPS.
-- Synchronization uses secure WebSocket (`wss://`) only.
+- Synchronization uses WSS only.
 
 ## Private browsing
 
 The manifest uses `incognito: "not_allowed"`.
 
-## Release gate
+## Automated release gate
 
-Every release must pass:
+Every release runs:
 
-1. `npm test`
-2. `npm run lint:addon`
-3. production-backend placeholder verification
-4. Mozilla unlisted signing
-5. signed XPI upload to GitHub Releases
-6. generation/deployment of an update manifest containing the XPI SHA-256
-7. installation/update verification in normal Firefox
+1. Node unit tests, including synchronization math;
+2. `web-ext lint --self-hosted`;
+3. `scripts/compliance-check.mjs`;
+4. `npm audit --omit=dev`;
+5. Wrangler dry-run build;
+6. version/backend/update-URL release verification;
+7. Mozilla unlisted signing;
+8. GitHub Release upload;
+9. SHA-256 update-manifest generation;
+10. GitHub Pages deployment.
+
+The Firefox Android min-version lint warning is not treated as desktop support.
+Watch Home v1 targets Firefox desktop.
 
 Relevant Mozilla references:
 

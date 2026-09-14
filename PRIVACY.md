@@ -1,6 +1,6 @@
 # Watch Home Privacy Notice
 
-Last updated: 2026-09-14
+Last updated: 2026-09-15
 
 Watch Home exists only to coordinate playback within an active private watch
 party.
@@ -18,6 +18,19 @@ During an active party the extension can transmit:
 
 These values are required to synchronize playback.
 
+## Local diagnostics
+
+The extension locally calculates synchronization diagnostics such as:
+
+- estimated playback drift;
+- server round-trip time and clock offset;
+- learned play/seek recovery latency;
+- correction mode/counts.
+
+These diagnostic values are displayed locally in the extension popup and are
+not sent to the Watch Home server. They leave the browser only if the user
+explicitly chooses **Copy diagnostics** and then shares the copied text.
+
 ## Data not intentionally collected by the application
 
 Watch Home does not intentionally collect or transmit:
@@ -34,8 +47,8 @@ Watch Home does not intentionally collect or transmit:
 
 ## Storage
 
-Firefox local extension storage keeps the local client identifier and the
-current room session so that the extension can reconnect after a reload.
+Firefox local extension storage keeps the local client identifier and current
+room session so that the extension can reconnect after a reload/restart.
 
 The Cloudflare Durable Object stores only temporary room-coordination state.
 When the last participant disconnects, the application deletes the room's

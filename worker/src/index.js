@@ -11,7 +11,8 @@ export default {
       return Response.json({
         ok: true,
         service: "watch-home",
-        protocol: 1
+        protocol: 1,
+        release: "1.1.0"
       });
     }
 

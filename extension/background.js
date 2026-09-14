@@ -3,17 +3,21 @@
 (() => {
   const { MessageType } = globalThis.WatchHomeProtocol;
   const config = globalThis.WatchHomeConfig;
+  const syncMath = globalThis.WatchHomeSyncMath;
 
   let socket = null;
   let socketGeneration = 0;
   let reconnectTimer = null;
   let reconnectAttempt = 0;
+  let reconnectAllowed = true;
   let clockTimer = null;
   let clockSamples = [];
   let clockOffsetMs = 0;
-  let contentPorts = new Map();
+  let clockRttMs = null;
+  const contentPorts = new Map();
   let session = null;
   let lastRoomState = null;
+  let lastSequence = null;
   let participantCount = 0;
   let intentionallyClosed = false;
 
@@ -25,8 +29,12 @@
     }
 
     const info = {
+      tabId: port.sender?.tab?.id ?? null,
+      windowId: port.sender?.tab?.windowId ?? null,
       watchId: null,
-      url: null
+      url: null,
+      diagnostics: null,
+      lastSeenAt: Date.now()
     };
 
     contentPorts.set(port, info);
@@ -40,13 +48,10 @@
     });
 
     void ready.then(async () => {
-      postToPort(port, {
-        type: MessageType.SESSION,
-        session: publicSession(),
-        clockOffsetMs
-      });
+      await maybeRebindRestoredSession(info);
+      sendSessionToPort(port);
 
-      if (lastRoomState) {
+      if (lastRoomState && isSessionPort(port)) {
         postToPort(port, {
           type: MessageType.ROOM_STATE,
           state: lastRoomState,
@@ -54,7 +59,7 @@
         });
       }
 
-      if (session && !isSocketUsable()) {
+      if (session && isSessionPort(port) && !isSocketUsable()) {
         await connectWebSocket();
       }
     });
@@ -66,9 +71,10 @@
 
   browser.runtime.onStartup.addListener(() => {
     void ready.then(() => {
-      if (session && contentPorts.size > 0) {
+      if (session && sessionPort() && !isSocketUsable()) {
         return connectWebSocket();
       }
+
       return null;
     });
   });
@@ -87,6 +93,11 @@
     }
 
     session = stored.watchHomeSession ?? null;
+
+    if (session) {
+      session.connected = false;
+      session.status = "disconnected";
+    }
   }
 
   async function handleRuntimeMessage(message) {
@@ -105,15 +116,12 @@
         return buildStatus();
 
       case "POPUP_RECONNECT":
+        reconnectAllowed = true;
         await connectWebSocket(true);
         return buildStatus();
 
       case "POPUP_OPEN_CORRECT":
-        if (lastRoomState?.watchId) {
-          await browser.tabs.create({
-            url: `https://www.netflix.com/watch/${lastRoomState.watchId}`
-          });
-        }
+        await openCorrectVideo();
         return buildStatus();
 
       default:
@@ -127,29 +135,47 @@
       return;
     }
 
+    info.lastSeenAt = Date.now();
+
     switch (message.type) {
       case MessageType.CONTENT_READY:
         info.watchId = message.watchId ?? null;
         info.url = message.url ?? null;
         contentPorts.set(port, info);
 
-        postToPort(port, {
-          type: MessageType.SESSION,
-          session: publicSession(),
-          clockOffsetMs
-        });
+        await maybeRebindRestoredSession(info);
 
-        if (lastRoomState) {
+        if (
+          session?.role === "host" &&
+          isSessionPort(port) &&
+          info.watchId &&
+          session.watchId !== info.watchId
+        ) {
+          session.watchId = info.watchId;
+          await persistSession();
+        }
+
+        sendSessionToPort(port);
+
+        if (lastRoomState && isSessionPort(port)) {
           postToPort(port, {
             type: MessageType.ROOM_STATE,
             state: lastRoomState,
             clockOffsetMs
           });
         }
+
+        if (session && isSessionPort(port) && !isSocketUsable()) {
+          await connectWebSocket();
+        }
         break;
 
       case MessageType.HOST_STATE:
-        if (session?.role !== "host" || !isSocketOpen()) {
+        if (
+          session?.role !== "host" ||
+          !isSessionPort(port) ||
+          !isSocketOpen()
+        ) {
           return;
         }
 
@@ -162,16 +188,21 @@
         break;
 
       case MessageType.REQUEST_STATE:
-        if (isSocketOpen()) {
+        if (isSessionPort(port) && isSocketOpen()) {
           sendSocket({ type: MessageType.REQUEST_STATE });
         }
         break;
 
       case MessageType.PLAYER_ERROR:
-        if (session) {
-          session.lastError = message.message;
+        if (session && isSessionPort(port)) {
+          session.lastError = message.message ?? null;
           await persistSession();
         }
+        break;
+
+      case MessageType.DIAGNOSTICS:
+        info.diagnostics = message.diagnostics ?? null;
+        contentPorts.set(port, info);
         break;
 
       default:
@@ -180,11 +211,12 @@
   }
 
   async function createParty() {
-    const active = activeContent();
+    const active = await activeContent();
     if (!active?.watchId) {
       return {
         ok: false,
-        error: "Open a Netflix movie or episode before creating a party."
+        error:
+          "Open and start a Netflix movie or episode in the current tab before creating a party."
       };
     }
 
@@ -192,12 +224,13 @@
     await startSession({
       roomId,
       role: "host",
-      watchId: active.watchId
+      watchId: active.watchId,
+      tabId: active.tabId
     });
 
     return {
       ok: true,
-      ...buildStatus()
+      ...(await buildStatus())
     };
   }
 
@@ -210,7 +243,8 @@
       };
     }
 
-    if (!activeContent()?.watchId) {
+    const active = await activeContent();
+    if (!active?.watchId) {
       return {
         ok: false,
         error: "Open the Netflix watch page from the host invite first."
@@ -220,17 +254,19 @@
     await startSession({
       roomId,
       role: "guest",
-      watchId: activeContent()?.watchId ?? null
+      watchId: active.watchId,
+      tabId: active.tabId
     });
 
     return {
       ok: true,
-      ...buildStatus()
+      ...(await buildStatus())
     };
   }
 
   async function startSession(nextSession) {
     intentionallyClosed = true;
+    reconnectAllowed = false;
     closeSocket();
 
     session = {
@@ -240,17 +276,25 @@
       lastError: null
     };
     lastRoomState = null;
+    lastSequence = null;
     participantCount = 0;
     reconnectAttempt = 0;
+    clockSamples = [];
+    clockOffsetMs = 0;
+    clockRttMs = null;
 
     await persistSession();
+
     intentionallyClosed = false;
+    reconnectAllowed = true;
+
     await connectWebSocket(true);
     broadcastSession();
   }
 
   async function leaveParty() {
     intentionallyClosed = true;
+    reconnectAllowed = false;
 
     if (isSocketOpen()) {
       sendSocket({ type: MessageType.LEAVE });
@@ -259,10 +303,12 @@
     closeSocket();
     session = null;
     lastRoomState = null;
+    lastSequence = null;
     participantCount = 0;
     reconnectAttempt = 0;
     clockSamples = [];
     clockOffsetMs = 0;
+    clockRttMs = null;
 
     await browser.storage.local.remove("watchHomeSession");
     broadcastSession();
@@ -271,13 +317,11 @@
   }
 
   async function connectWebSocket(force = false) {
-    if (!session) {
+    if (!session || !sessionPort()) {
       return;
     }
 
-    if (
-      config.backendWsOrigin.includes("example.workers.dev")
-    ) {
+    if (config.backendWsOrigin.includes("example.workers.dev")) {
       session.status = "configuration-error";
       session.lastError =
         "The production Cloudflare Worker URL has not been configured.";
@@ -319,6 +363,7 @@
       }
 
       reconnectAttempt = 0;
+      reconnectAllowed = true;
       startClockSync();
       sendPing();
     });
@@ -331,7 +376,7 @@
       handleSocketMessage(event.data);
     });
 
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (event) => {
       if (generation !== socketGeneration) {
         return;
       }
@@ -339,14 +384,27 @@
       stopClockSync();
       socket = null;
 
+      if ([4003, 4008].includes(event.code)) {
+        reconnectAllowed = false;
+      }
+
       if (session) {
         session.connected = false;
-        session.status = "disconnected";
+
+        if (session.status !== "error") {
+          session.status = "disconnected";
+        }
+
         void persistSession();
         broadcastSession();
       }
 
-      if (!intentionallyClosed && session) {
+      if (
+        !intentionallyClosed &&
+        reconnectAllowed &&
+        session &&
+        sessionPort()
+      ) {
         scheduleReconnect();
       }
     });
@@ -376,17 +434,20 @@
         session.role = message.role;
         session.lastError = null;
         participantCount = message.participantCount ?? participantCount;
-        lastRoomState = message.state ?? lastRoomState;
-        void persistSession();
 
-        if (Number.isFinite(message.serverTime)) {
-          addClockSample(Date.now(), Date.now(), message.serverTime);
+        if (message.state) {
+          acceptRoomState(message.state, true);
+        } else {
+          lastRoomState = null;
+          lastSequence = null;
         }
+
+        void persistSession();
 
         broadcastSession();
 
         if (lastRoomState) {
-          broadcastToContent({
+          sendToSessionContent({
             type: MessageType.ROOM_STATE,
             state: lastRoomState,
             clockOffsetMs
@@ -403,8 +464,11 @@
         break;
 
       case MessageType.ROOM_STATE:
-        lastRoomState = message.state;
-        broadcastToContent({
+        if (!acceptRoomState(message.state)) {
+          return;
+        }
+
+        sendToSessionContent({
           type: MessageType.ROOM_STATE,
           state: lastRoomState,
           clockOffsetMs
@@ -412,8 +476,11 @@
         break;
 
       case MessageType.HOST_OFFLINE:
-        lastRoomState = message.state ?? lastRoomState;
-        broadcastToContent({
+        if (!acceptRoomState(message.state)) {
+          return;
+        }
+
+        sendToSessionContent({
           type: MessageType.HOST_OFFLINE,
           state: lastRoomState
         });
@@ -427,6 +494,11 @@
         if (session) {
           session.lastError = message.message ?? "Server rejected the request.";
           session.status = "error";
+
+          if (message.retryable === false) {
+            reconnectAllowed = false;
+          }
+
           void persistSession();
           broadcastSession();
         }
@@ -435,6 +507,27 @@
       default:
         break;
     }
+  }
+
+  function acceptRoomState(state, force = false) {
+    if (!state) {
+      return false;
+    }
+
+    if (
+      !force &&
+      !syncMath.isNewerSequence(lastSequence, state.sequence)
+    ) {
+      return false;
+    }
+
+    lastRoomState = state;
+
+    if (Number.isFinite(state.sequence)) {
+      lastSequence = state.sequence;
+    }
+
+    return true;
   }
 
   function addClockSample(clientSentAt, clientReceivedAt, serverTime) {
@@ -453,15 +546,11 @@
     clockSamples.push({ rtt, offset });
     clockSamples = clockSamples.slice(-9);
 
-    const preferred = [...clockSamples]
-      .sort((left, right) => left.rtt - right.rtt)
-      .slice(0, Math.min(3, clockSamples.length));
+    const estimate = syncMath.selectClockEstimate(clockSamples);
+    clockOffsetMs = estimate.offsetMs;
+    clockRttMs = estimate.rttMs;
 
-    clockOffsetMs =
-      preferred.reduce((sum, sample) => sum + sample.offset, 0) /
-      preferred.length;
-
-    broadcastToContent({
+    sendToSessionContent({
       type: MessageType.CLOCK,
       clockOffsetMs
     });
@@ -501,10 +590,13 @@
   function scheduleReconnect() {
     clearReconnectTimer();
 
-    const delay = Math.min(
+    const exponent = Math.min(reconnectAttempt, 6);
+    const baseDelay = Math.min(
       config.reconnectMaxMs,
-      config.reconnectBaseMs * 2 ** reconnectAttempt
+      config.reconnectBaseMs * 2 ** exponent
     );
+    const jitter = Math.floor(Math.random() * 250);
+    const delay = baseDelay + jitter;
     reconnectAttempt += 1;
 
     reconnectTimer = setTimeout(() => {
@@ -548,9 +640,18 @@
     );
   }
 
-  function activeContent() {
+  async function activeContent() {
+    const [activeTab] = await browser.tabs.query({
+      active: true,
+      currentWindow: true
+    });
+
+    if (!activeTab) {
+      return null;
+    }
+
     for (const info of contentPorts.values()) {
-      if (info.watchId) {
+      if (info.tabId === activeTab.id) {
         return info;
       }
     }
@@ -558,13 +659,52 @@
     return null;
   }
 
-  function buildStatus() {
-    const active = activeContent();
+  function sessionPort() {
+    if (!session?.tabId) {
+      return null;
+    }
+
+    for (const [port, info] of contentPorts) {
+      if (info.tabId === session.tabId) {
+        return port;
+      }
+    }
+
+    return null;
+  }
+
+  function isSessionPort(port) {
+    return Boolean(session && sessionPort() === port);
+  }
+
+  async function maybeRebindRestoredSession(info) {
+    if (!session || !info?.tabId || !info.watchId) {
+      return;
+    }
+
+    if (sessionPort()) {
+      return;
+    }
+
+    if (
+      session.tabId === info.tabId ||
+      session.watchId === info.watchId
+    ) {
+      session.tabId = info.tabId;
+      await persistSession();
+    }
+  }
+
+  async function buildStatus() {
+    const active = await activeContent();
+    const bound = sessionPort()
+      ? contentPorts.get(sessionPort())
+      : null;
     const mismatch = Boolean(
       session?.role === "guest" &&
       lastRoomState?.watchId &&
-      active?.watchId &&
-      lastRoomState.watchId !== active.watchId
+      bound?.watchId &&
+      lastRoomState.watchId !== bound.watchId
     );
 
     return {
@@ -575,11 +715,36 @@
         : null,
       participantCount,
       activeWatchId: active?.watchId ?? null,
+      boundWatchId: bound?.watchId ?? null,
       partyWatchId: lastRoomState?.watchId ?? null,
+      hostOnline: lastRoomState?.mode !== "offline",
       mismatch,
       invite: session?.roomId
-        ? buildInvite(session.roomId, lastRoomState?.watchId ?? active?.watchId)
-        : null
+        ? buildInvite(
+            session.roomId,
+            lastRoomState?.watchId ?? bound?.watchId ?? session.watchId
+          )
+        : null,
+      diagnostics: {
+        sampledAt: Date.now(),
+        network: {
+          clockOffsetMs: Math.round(clockOffsetMs),
+          rttMs: Number.isFinite(clockRttMs)
+            ? Math.round(clockRttMs)
+            : null,
+          reconnectAttempt,
+          sequence: lastSequence
+        },
+        content: bound?.diagnostics ?? null,
+        room: lastRoomState
+          ? {
+              mode: lastRoomState.mode,
+              watchId: lastRoomState.watchId,
+              sequence: lastRoomState.sequence,
+              playbackRate: lastRoomState.playbackRate
+            }
+          : null
+      }
     };
   }
 
@@ -607,15 +772,34 @@
   }
 
   function broadcastSession() {
-    broadcastToContent({
+    for (const [port, info] of contentPorts) {
+      postToPort(port, {
+        type: MessageType.SESSION,
+        session:
+          session && info.tabId === session.tabId
+            ? publicSession()
+            : null,
+        clockOffsetMs
+      });
+    }
+  }
+
+  function sendSessionToPort(port) {
+    const info = contentPorts.get(port);
+
+    postToPort(port, {
       type: MessageType.SESSION,
-      session: publicSession(),
+      session:
+        session && info?.tabId === session.tabId
+          ? publicSession()
+          : null,
       clockOffsetMs
     });
   }
 
-  function broadcastToContent(message) {
-    for (const port of contentPorts.keys()) {
+  function sendToSessionContent(message) {
+    const port = sessionPort();
+    if (port) {
       postToPort(port, message);
     }
   }
@@ -626,6 +810,26 @@
     } catch {
       contentPorts.delete(port);
     }
+  }
+
+  async function openCorrectVideo() {
+    if (!lastRoomState?.watchId) {
+      return;
+    }
+
+    const [activeTab] = await browser.tabs.query({
+      active: true,
+      currentWindow: true
+    });
+
+    const url = `https://www.netflix.com/watch/${lastRoomState.watchId}`;
+
+    if (activeTab?.id) {
+      await browser.tabs.update(activeTab.id, { url });
+      return;
+    }
+
+    await browser.tabs.create({ url });
   }
 
   async function persistSession() {

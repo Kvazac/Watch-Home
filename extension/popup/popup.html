@@ -59,6 +59,24 @@
         <button id="leave-button" class="danger" type="button">
           Leave party
         </button>
+
+        <details id="diagnostics">
+          <summary>Diagnostics</summary>
+          <dl>
+            <div><dt>Sync</dt><dd id="diag-mode">—</dd></div>
+            <div><dt>Drift</dt><dd id="diag-drift">—</dd></div>
+            <div><dt>RTT</dt><dd id="diag-rtt">—</dd></div>
+            <div><dt>Clock offset</dt><dd id="diag-offset">—</dd></div>
+            <div><dt>Sequence</dt><dd id="diag-sequence">—</dd></div>
+            <div><dt>Play latency</dt><dd id="diag-play-latency">—</dd></div>
+            <div><dt>Seek latency</dt><dd id="diag-seek-latency">—</dd></div>
+            <div><dt>Hard seeks</dt><dd id="diag-hard-seeks">—</dd></div>
+            <div><dt>Soft corrections</dt><dd id="diag-soft-corrections">—</dd></div>
+          </dl>
+          <button id="copy-diagnostics-button" type="button">
+            Copy diagnostics
+          </button>
+        </details>
       </section>
 
       <p id="message" role="status"></p>

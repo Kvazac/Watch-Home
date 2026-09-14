@@ -1,73 +1,73 @@
 # Watch Home
 
-Watch Home is a small, private Firefox extension that synchronizes Netflix
+Watch Home is a small private Firefox extension that synchronizes Netflix
 playback between trusted participants. Every participant streams Netflix from
-their own Netflix account. Watch Home only coordinates playback state.
+their own Netflix account; Watch Home only coordinates playback state.
 
-## User installation
+## Current v1.1 scope
+
+- host-authoritative play/pause/seek/playback-rate synchronization;
+- predictive late-join and buffering recovery;
+- clock-offset/RTT estimation;
+- soft drift correction before hard seeking;
+- host-stall propagation;
+- automatic WebSocket/session recovery;
+- Netflix episode/navigation tracking;
+- wrong-title recovery;
+- popup diagnostics for real-device testing;
+- Mozilla-signed self-distribution through GitHub Releases;
+- Firefox self-hosted automatic updates through GitHub Pages;
+- automated CI, compliance checks, and release preflight.
+
+## Installation
 
 1. Open the latest GitHub Release.
 2. Download `watch-home-<version>.xpi`.
-3. In Firefox open **Add-ons and themes**.
-4. Open the gear menu and choose **Install Add-on From File**.
-5. Select the downloaded XPI.
-
-After the first installation, Firefox checks the self-hosted update manifest
-and can update later Mozilla-signed releases automatically.
+3. Firefox -> Add-ons and themes.
+4. Gear menu -> Install Add-on From File.
+5. Select the downloaded Mozilla-signed XPI.
 
 ## Use
 
 ### Host
 
-1. Open a Netflix `/watch/...` page.
-2. Click the Watch Home toolbar button.
+1. Open and start a Netflix `/watch/...` page.
+2. Click Watch Home.
 3. Click **Create party**.
-4. Send the generated invite to the guest.
+4. Send the generated invite.
 
 ### Guest
 
 1. Open the Netflix link from the invite.
 2. Click Watch Home.
-3. Paste the room code.
+3. Enter the room code.
 4. Click **Join party**.
 
 The host is the playback authority in v1.
 
-## Repository layout
+## Windows CMD development
 
-- `extension/` — Firefox Manifest V3 extension.
-- `worker/` — Cloudflare Worker and Durable Object.
-- `scripts/` — configuration and release helpers.
-- `site/` — static files deployed to GitHub Pages.
-- `.github/workflows/` — CI and signed release automation.
-- `docs/` — administrator and testing documentation.
-
-## Development
-
-Requires Node.js 22 or newer.
-
-```bash
+```cmd
 npm install
-npm test
-npm run lint:addon
-npm run dev:worker
+scripts\verify-local.cmd
+scripts\health-check.cmd
+npx web-ext run --source-dir extension
 ```
 
-Before signing a production build, configure the final Workers URL:
+Do not use Unix `\` line continuations in Windows Command Prompt.
 
-```bash
-npm run configure -- --backend https://watch-home.YOUR-SUBDOMAIN.workers.dev
-```
+## Administrator testing/release
 
-Then commit the resulting changes.
+See:
+
+- `docs/ADMIN_TASKS_1_TO_10.md`
+- `docs/TESTING.md`
+- `MOZILLA_COMPLIANCE.md`
+- `PRIVACY.md`
 
 ## Privacy
 
 See `PRIVACY.md`.
-
-## Mozilla conformity
-
-See `MOZILLA_COMPLIANCE.md`.
 
 ## License
 

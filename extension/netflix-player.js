@@ -11,16 +11,24 @@
     }
 
     start() {
+      if (this.monitorTimer !== null) {
+        return;
+      }
+
       this.attachCurrentVideo();
       this.monitorTimer = window.setInterval(() => {
         this.attachCurrentVideo();
 
         const nextWatchId = this.getWatchId();
         if (nextWatchId !== this.watchId) {
+          const previousWatchId = this.watchId;
           this.watchId = nextWatchId;
-          this.emit("navigation", { watchId: nextWatchId });
+          this.emit("navigation", {
+            watchId: nextWatchId,
+            previousWatchId
+          });
         }
-      }, 500);
+      }, 400);
     }
 
     stop() {
@@ -63,17 +71,40 @@
 
     getState(modeOverride = null) {
       const video = this.getVideo();
-      if (!video || !this.getWatchId()) {
+      const watchId = this.getWatchId();
+
+      if (!video || !watchId) {
         return null;
       }
 
       return {
-        watchId: this.getWatchId(),
+        watchId,
         position: Number.isFinite(video.currentTime) ? video.currentTime : 0,
         playbackRate: Number.isFinite(video.playbackRate)
           ? video.playbackRate
           : 1,
         mode: modeOverride ?? (video.paused ? "paused" : "playing")
+      };
+    }
+
+    getDiagnostics() {
+      const video = this.getVideo();
+
+      return {
+        watchId: this.getWatchId(),
+        hasVideo: Boolean(video),
+        position: video && Number.isFinite(video.currentTime)
+          ? video.currentTime
+          : null,
+        duration: video && Number.isFinite(video.duration)
+          ? video.duration
+          : null,
+        paused: video?.paused ?? null,
+        playbackRate: video && Number.isFinite(video.playbackRate)
+          ? video.playbackRate
+          : null,
+        readyState: video?.readyState ?? null,
+        networkState: video?.networkState ?? null
       };
     }
 
@@ -142,10 +173,12 @@
         "pause",
         "playing",
         "waiting",
+        "stalled",
         "seeking",
         "seeked",
         "ratechange",
         "loadedmetadata",
+        "canplay",
         "emptied"
       ];
 

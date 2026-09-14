@@ -2,6 +2,7 @@
 
 (() => {
   const { MessageType } = globalThis.WatchHomeProtocol;
+  const config = globalThis.WatchHomeConfig;
   const player = new globalThis.NetflixPlayerAdapter();
   const controller = new globalThis.WatchHomeSyncController(
     player,
@@ -19,6 +20,8 @@
   let hostStalled = false;
   let stallTimer = null;
   let heartbeatTimer = null;
+  let diagnosticsTimer = null;
+  let guestStateRequestedForConnection = false;
 
   function connectPort() {
     if (port) {
@@ -30,6 +33,7 @@
     port.onMessage.addListener(handleBackgroundMessage);
     port.onDisconnect.addListener(() => {
       port = null;
+      guestStateRequestedForConnection = false;
 
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
@@ -65,9 +69,27 @@
       case MessageType.SESSION:
         session = message.session;
         clockOffsetMs = message.clockOffsetMs ?? clockOffsetMs;
+        controller.updateClockOffset(clockOffsetMs);
 
-        if (session?.role === "host" && session.connected) {
+        if (!session) {
+          latestRoomState = null;
+          guestStateRequestedForConnection = false;
+          controller.stop();
+          controller.start();
+          return;
+        }
+
+        if (session.role === "host" && session.connected) {
           sendHostState("session-ready");
+        }
+
+        if (
+          session.role === "guest" &&
+          session.connected &&
+          !guestStateRequestedForConnection
+        ) {
+          guestStateRequestedForConnection = true;
+          sendPortMessage({ type: MessageType.REQUEST_STATE });
         }
         break;
 
@@ -103,7 +125,10 @@
       return;
     }
 
-    const state = player.getState(modeOverride ?? (hostStalled ? "stalled" : null));
+    const state = player.getState(
+      modeOverride ?? (hostStalled ? "stalled" : null)
+    );
+
     if (!state) {
       return;
     }
@@ -124,7 +149,46 @@
       return;
     }
 
-    window.setTimeout(() => controller.reapplyNow(), 25);
+    window.setTimeout(() => controller.reapplyNow(), 30);
+  }
+
+  function sendDiagnostics() {
+    const playerDiagnostics = player.getDiagnostics();
+    let syncDiagnostics;
+
+    if (session?.role === "guest") {
+      syncDiagnostics = controller.getDiagnostics();
+    } else if (session?.role === "host") {
+      syncDiagnostics = {
+        mode: hostStalled ? "host-buffering" : "host-authority",
+        localPosition: playerDiagnostics.position,
+        predictedPosition: playerDiagnostics.position,
+        driftMs: 0,
+        localRate: playerDiagnostics.playbackRate,
+        canonicalRate: playerDiagnostics.playbackRate,
+        readyState: playerDiagnostics.readyState,
+        paused: playerDiagnostics.paused,
+        playLatencyMs: null,
+        seekLatencyMs: null,
+        hardCorrectionCount: 0,
+        softCorrectionCount: 0,
+        lastCorrectionAt: null,
+        sequence: latestRoomState?.sequence ?? null
+      };
+    } else {
+      syncDiagnostics = {
+        mode: "not-in-party"
+      };
+    }
+
+    sendPortMessage({
+      type: MessageType.DIAGNOSTICS,
+      diagnostics: {
+        sampledAt: Date.now(),
+        player: playerDiagnostics,
+        sync: syncDiagnostics
+      }
+    });
   }
 
   player.on("play", () => {
@@ -160,7 +224,7 @@
     }
   });
 
-  player.on("waiting", ({ video }) => {
+  function scheduleHostStall(video) {
     if (session?.role !== "host" || video.paused) {
       return;
     }
@@ -180,8 +244,11 @@
         hostStalled = true;
         sendHostState("stall", "stalled");
       }
-    }, 200);
-  });
+    }, config.hostStallDebounceMs);
+  }
+
+  player.on("waiting", ({ video }) => scheduleHostStall(video));
+  player.on("stalled", ({ video }) => scheduleHostStall(video));
 
   player.on("playing", () => {
     if (stallTimer !== null) {
@@ -193,20 +260,59 @@
       hostStalled = false;
       sendHostState("stall-recovered", "playing");
     }
+
+    if (session?.role === "guest") {
+      sendPortMessage({
+        type: MessageType.PLAYER_ERROR,
+        message: null
+      });
+      controller.reapplyNow();
+    }
   });
 
-  player.on("navigation", () => {
+  player.on("canplay", () => {
+    if (session?.role === "guest") {
+      controller.reapplyNow();
+    }
+  });
+
+  player.on("navigation", ({ watchId }) => {
     announceContent();
     latestRoomState = null;
 
-    if (session?.role === "host") {
+    if (session?.role === "host" && watchId) {
       window.setTimeout(() => sendHostState("navigation"), 500);
     }
   });
 
   player.on("videochange", () => {
+    announceContent();
+
     if (session?.role === "host") {
       window.setTimeout(() => sendHostState("videochange"), 250);
+    } else if (session?.role === "guest") {
+      window.setTimeout(() => controller.reapplyNow(), 250);
+    }
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      announceContent();
+
+      if (session?.role === "guest") {
+        sendPortMessage({ type: MessageType.REQUEST_STATE });
+        controller.reapplyNow();
+      } else if (session?.role === "host") {
+        sendHostState("visibility-resume");
+      }
+    }
+  });
+
+  window.addEventListener("pageshow", () => {
+    announceContent();
+
+    if (session?.role === "guest") {
+      sendPortMessage({ type: MessageType.REQUEST_STATE });
     }
   });
 
@@ -218,11 +324,24 @@
     if (session?.role === "host" && session.connected) {
       sendHostState("heartbeat");
     }
-  }, 2500);
+  }, config.heartbeatIntervalMs);
+
+  diagnosticsTimer = window.setInterval(
+    sendDiagnostics,
+    config.diagnosticsIntervalMs
+  );
 
   window.addEventListener("pagehide", () => {
     if (heartbeatTimer !== null) {
       window.clearInterval(heartbeatTimer);
+    }
+
+    if (diagnosticsTimer !== null) {
+      window.clearInterval(diagnosticsTimer);
+    }
+
+    if (stallTimer !== null) {
+      window.clearTimeout(stallTimer);
     }
 
     player.stop();

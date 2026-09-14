@@ -7,5 +7,6 @@ globalThis.WatchHomeConfig = Object.freeze({
   clockSyncIntervalMs: 10000,
   hostStallDebounceMs: 200,
   reconnectBaseMs: 500,
-  reconnectMaxMs: 10000
+  reconnectMaxMs: 10000,
+  diagnosticsIntervalMs: 1000
 });

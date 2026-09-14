@@ -19,6 +19,10 @@
       this.seekLatencyMs = DEFAULT_SEEK_LATENCY_MS;
       this.pendingPlayStartedAt = null;
       this.pendingSeekStartedAt = null;
+      this.hardCorrectionCount = 0;
+      this.softCorrectionCount = 0;
+      this.lastCorrectionAt = null;
+      this.lastDiagnostics = this.emptyDiagnostics("idle");
 
       this.player.on("playing", () => this.observePlaying());
       this.player.on("seeked", () => this.observeSeeked());
@@ -38,8 +42,9 @@
         this.tickTimer = null;
       }
 
-      this.latestState = null;
       this.restoreCanonicalRate();
+      this.latestState = null;
+      this.lastDiagnostics = this.emptyDiagnostics("idle");
     }
 
     applyRoomState(state, clockOffsetMs) {
@@ -69,21 +74,23 @@
     }
 
     predictPosition(state, additionalLatencyMs = 0) {
-      if (!state) {
-        return 0;
-      }
-
-      if (state.mode !== "playing") {
-        return state.position;
-      }
-
-      const estimatedServerNow = Date.now() + this.clockOffsetMs;
-      const elapsedMs = Math.max(
-        0,
-        estimatedServerNow + additionalLatencyMs - state.anchorServerTime
+      return globalThis.WatchHomeSyncMath.predictPosition(
+        state,
+        Date.now() + this.clockOffsetMs,
+        additionalLatencyMs
       );
+    }
 
-      return state.position + (elapsedMs / 1000) * state.playbackRate;
+    getDiagnostics() {
+      return {
+        ...this.lastDiagnostics,
+        playLatencyMs: Math.round(this.playLatencyMs),
+        seekLatencyMs: Math.round(this.seekLatencyMs),
+        hardCorrectionCount: this.hardCorrectionCount,
+        softCorrectionCount: this.softCorrectionCount,
+        lastCorrectionAt: this.lastCorrectionAt,
+        sequence: this.latestState?.sequence ?? null
+      };
     }
 
     tick(force = false) {
@@ -91,10 +98,18 @@
       const video = this.player.getVideo();
 
       if (!state || !video) {
+        this.lastDiagnostics = this.emptyDiagnostics(
+          video ? "waiting-for-room-state" : "waiting-for-video"
+        );
         return;
       }
 
       if (state.watchId !== this.player.getWatchId()) {
+        this.lastDiagnostics = this.createDiagnostics(
+          "wrong-title",
+          video,
+          state
+        );
         return;
       }
 
@@ -109,26 +124,35 @@
     synchronizePlaying(video, state, force) {
       const targetNow = this.predictPosition(state);
       const driftSeconds = targetNow - video.currentTime;
-      const absoluteDrift = Math.abs(driftSeconds);
+      const hardCorrectionAvailable =
+        performance.now() >= this.hardCorrectionCooldownUntil;
 
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        this.lastDiagnostics = this.createDiagnostics(
+          "local-buffering",
+          video,
+          state,
+          targetNow,
+          driftSeconds
+        );
         return;
       }
 
-      if (
-        performance.now() >= this.hardCorrectionCooldownUntil &&
-        (video.paused || absoluteDrift > 1.5)
-      ) {
+      const decision = globalThis.WatchHomeSyncMath.chooseCorrection(
+        driftSeconds,
+        {
+          force,
+          videoPaused: video.paused,
+          hardCorrectionAvailable
+        }
+      );
+
+      if (decision.kind === "hard") {
         this.performPredictiveRecovery(state, video);
         return;
       }
 
-      if (video.paused) {
-        this.requestPlay();
-        return;
-      }
-
-      if (absoluteDrift < 0.07) {
+      if (decision.kind === "settled") {
         if (this.withinExitBandSince === null) {
           this.withinExitBandSince = performance.now();
         }
@@ -139,85 +163,135 @@
         ) {
           this.restoreCanonicalRate();
         }
+
+        this.lastDiagnostics = this.createDiagnostics(
+          this.correctionActive ? "settling" : "in-sync",
+          video,
+          state,
+          targetNow,
+          driftSeconds
+        );
         return;
       }
 
       this.withinExitBandSince = null;
 
-      if (absoluteDrift < 0.12 && !force) {
+      if (decision.kind === "ignore") {
+        this.lastDiagnostics = this.createDiagnostics(
+          "in-sync",
+          video,
+          state,
+          targetNow,
+          driftSeconds
+        );
         return;
       }
 
-      const correction = this.correctionMagnitude(absoluteDrift);
-      const direction = Math.sign(driftSeconds);
-      const targetRate = state.playbackRate * (1 + direction * correction);
+      const targetRate = state.playbackRate * decision.rateMultiplier;
+      const alreadyCorrecting =
+        this.correctionActive &&
+        Math.abs(video.playbackRate - targetRate) < 0.002;
 
       this.remoteActionUntil = performance.now() + 300;
       this.player.setPlaybackRate(targetRate);
       this.correctionActive = true;
+
+      if (!alreadyCorrecting) {
+        this.softCorrectionCount += 1;
+        this.lastCorrectionAt = Date.now();
+      }
+
+      this.lastDiagnostics = this.createDiagnostics(
+        decision.kind,
+        video,
+        state,
+        targetNow,
+        driftSeconds
+      );
     }
 
     synchronizeStopped(video, state) {
       const target = state.position;
       const driftSeconds = target - video.currentTime;
+      const mode =
+        state.mode === "offline"
+          ? "host-offline"
+          : state.mode === "stalled"
+            ? "host-buffering"
+            : "paused-sync";
 
       this.restoreCanonicalRate();
 
       if (!video.paused) {
-        this.remoteActionUntil = performance.now() + 300;
+        this.remoteActionUntil = performance.now() + 350;
         this.player.pause();
       }
 
       if (Math.abs(driftSeconds) > 0.08) {
-        this.remoteActionUntil = performance.now() + 500;
+        this.remoteActionUntil = performance.now() + 650;
         this.pendingSeekStartedAt = performance.now();
         this.player.seek(target);
       }
-    }
 
-    correctionMagnitude(absoluteDrift) {
-      if (absoluteDrift < 0.4) {
-        return 0.025;
-      }
-
-      if (absoluteDrift < 0.9) {
-        return 0.05;
-      }
-
-      return 0.075;
+      this.lastDiagnostics = this.createDiagnostics(
+        mode,
+        video,
+        state,
+        target,
+        driftSeconds
+      );
     }
 
     performPredictiveRecovery(state, video) {
+      const targetNow = this.predictPosition(state);
+      const needsSeek = Math.abs(targetNow - video.currentTime) > 0.08;
       const expectedLatencyMs = Math.max(
-        100,
-        Math.min(700, this.seekLatencyMs + (video.paused ? this.playLatencyMs : 0))
+        50,
+        Math.min(
+          900,
+          (needsSeek ? this.seekLatencyMs : 0) +
+            (video.paused ? this.playLatencyMs : 0)
+        )
       );
-      const predictiveTarget = this.predictPosition(state, expectedLatencyMs);
+      const predictiveTarget = this.predictPosition(
+        state,
+        expectedLatencyMs
+      );
 
-      this.remoteActionUntil = performance.now() + 1200;
-      this.hardCorrectionCooldownUntil = performance.now() + 1200;
-      this.pendingSeekStartedAt = performance.now();
+      this.remoteActionUntil = performance.now() + 1500;
+      this.hardCorrectionCooldownUntil = performance.now() + 1500;
+      this.hardCorrectionCount += 1;
+      this.lastCorrectionAt = Date.now();
 
       if (Math.abs(predictiveTarget - video.currentTime) > 0.08) {
+        this.pendingSeekStartedAt = performance.now();
         this.player.seek(predictiveTarget);
       }
 
       this.restoreCanonicalRate();
 
       if (video.paused) {
-        this.requestPlay();
+        void this.requestPlay();
       }
+
+      this.lastDiagnostics = this.createDiagnostics(
+        "hard-seek",
+        video,
+        state,
+        predictiveTarget,
+        predictiveTarget - video.currentTime
+      );
     }
 
     async requestPlay() {
-      this.remoteActionUntil = performance.now() + 800;
+      this.remoteActionUntil = performance.now() + 1000;
       this.pendingPlayStartedAt = performance.now();
 
       try {
         await this.player.play();
       } catch (error) {
         this.onError?.(
-          "Firefox blocked remote playback. Click Play once in Netflix, then retry."
+          "Firefox blocked synchronized playback. Click Play once in Netflix, then Watch Home will keep it synchronized."
         );
         console.warn("Watch Home could not start playback", error);
       }
@@ -249,14 +323,55 @@
     }
 
     restoreCanonicalRate() {
-      if (!this.latestState) {
-        return;
+      if (this.latestState) {
+        this.remoteActionUntil = performance.now() + 250;
+        this.player.setPlaybackRate(this.latestState.playbackRate);
       }
 
-      this.remoteActionUntil = performance.now() + 250;
-      this.player.setPlaybackRate(this.latestState.playbackRate);
       this.correctionActive = false;
       this.withinExitBandSince = null;
+    }
+
+    emptyDiagnostics(mode) {
+      return {
+        mode,
+        localPosition: null,
+        predictedPosition: null,
+        driftMs: null,
+        localRate: null,
+        canonicalRate: null,
+        readyState: null,
+        paused: null
+      };
+    }
+
+    createDiagnostics(
+      mode,
+      video,
+      state,
+      predictedPosition = null,
+      driftSeconds = null
+    ) {
+      return {
+        mode,
+        localPosition: Number.isFinite(video?.currentTime)
+          ? video.currentTime
+          : null,
+        predictedPosition: Number.isFinite(predictedPosition)
+          ? predictedPosition
+          : null,
+        driftMs: Number.isFinite(driftSeconds)
+          ? Math.round(driftSeconds * 1000)
+          : null,
+        localRate: Number.isFinite(video?.playbackRate)
+          ? video.playbackRate
+          : null,
+        canonicalRate: Number.isFinite(state?.playbackRate)
+          ? state.playbackRate
+          : null,
+        readyState: video?.readyState ?? null,
+        paused: video?.paused ?? null
+      };
     }
   }
 

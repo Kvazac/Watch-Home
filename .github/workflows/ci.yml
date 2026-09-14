@@ -28,8 +28,14 @@ jobs:
       - name: Run unit tests
         run: npm test
 
-      - name: Lint Firefox extension
+      - name: Lint self-hosted Firefox extension
         run: npm run lint:addon
+
+      - name: Check Mozilla/privacy conformity invariants
+        run: npm run check:compliance
+
+      - name: Audit runtime dependency surface
+        run: npm run audit:runtime
 
       - name: Dry-run Cloudflare Worker build
         run: npx wrangler deploy --dry-run --outdir .wrangler-dry-run
