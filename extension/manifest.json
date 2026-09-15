@@ -3,6 +3,14 @@
   "name": "Watch Home",
   "version": "1.1.0",
   "description": "Synchronize Netflix playback for a small private watch party.",
+
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  },
+
   "browser_specific_settings": {
     "gecko": {
       "id": "watch-home@Kvazac",
@@ -16,26 +24,34 @@
       }
     }
   },
+
   "permissions": [
     "storage"
   ],
+
   "host_permissions": [
     "https://www.netflix.com/*",
     "https://watch-home.ugnius-socials.workers.dev/*"
   ],
+
   "background": {
     "scripts": [
       "config.js",
       "shared/protocol.js",
-      "shared/sync-math.js",
       "background.js"
     ],
     "persistent": false
   },
+
   "action": {
     "default_title": "Watch Home",
-    "default_popup": "popup/popup.html"
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
   },
+
   "content_scripts": [
     {
       "matches": [
@@ -43,7 +59,6 @@
       ],
       "js": [
         "shared/protocol.js",
-        "shared/sync-math.js",
         "netflix-player.js",
         "sync-controller.js",
         "content.js"
@@ -51,5 +66,6 @@
       "run_at": "document_idle"
     }
   ],
+
   "incognito": "not_allowed"
 }
