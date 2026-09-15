@@ -5,6 +5,16 @@
   const config = globalThis.WatchHomeConfig;
   const syncMath = globalThis.WatchHomeSyncMath;
 
+  const NETWORK_ERROR_MESSAGE = "Could not reach the Watch Home server.";
+  const RECONNECTING_MESSAGE = "Connection lost. Reconnecting…";
+  const TERMINAL_CLOSE_CODES = new Set([4003, 4008]);
+
+  if (!syncMath) {
+    throw new Error(
+      "Watch Home SyncMath is not loaded. Add shared/sync-math.js before background.js in manifest.json."
+    );
+  }
+
   let socket = null;
   let socketGeneration = 0;
   let reconnectTimer = null;
@@ -14,13 +24,13 @@
   let clockSamples = [];
   let clockOffsetMs = 0;
   let clockRttMs = null;
-  const contentPorts = new Map();
   let session = null;
   let lastRoomState = null;
   let lastSequence = null;
   let participantCount = 0;
   let intentionallyClosed = false;
 
+  const contentPorts = new Map();
   const ready = restoreState();
 
   browser.runtime.onConnect.addListener((port) => {
@@ -36,7 +46,6 @@
       diagnostics: null,
       lastSeenAt: Date.now()
     };
-
     contentPorts.set(port, info);
 
     port.onMessage.addListener((message) => {
@@ -74,7 +83,6 @@
       if (session && sessionPort() && !isSocketUsable()) {
         return connectWebSocket();
       }
-
       return null;
     });
   });
@@ -93,10 +101,18 @@
     }
 
     session = stored.watchHomeSession ?? null;
+    if (!session) {
+      return;
+    }
 
-    if (session) {
-      session.connected = false;
-      session.status = "disconnected";
+    session.connected = false;
+    session.status = "disconnected";
+
+    if (
+      session.lastError === NETWORK_ERROR_MESSAGE ||
+      session.lastError === RECONNECTING_MESSAGE
+    ) {
+      session.lastError = null;
     }
   }
 
@@ -172,19 +188,17 @@
 
       case MessageType.HOST_STATE:
         if (
-          session?.role !== "host" ||
-          !isSessionPort(port) ||
-          !isSocketOpen()
+          session?.role === "host" &&
+          isSessionPort(port) &&
+          isSocketOpen()
         ) {
-          return;
+          sendSocket({
+            type: MessageType.HOST_STATE,
+            reason: message.reason,
+            state: message.state,
+            estimatedServerTime: Date.now() + clockOffsetMs
+          });
         }
-
-        sendSocket({
-          type: MessageType.HOST_STATE,
-          reason: message.reason,
-          state: message.state,
-          estimatedServerTime: Date.now() + clockOffsetMs
-        });
         break;
 
       case MessageType.REQUEST_STATE:
@@ -216,7 +230,7 @@
       return {
         ok: false,
         error:
-          "Open and start a Netflix movie or episode in the current tab before creating a party. \n Don't forget to reload the Netflix page after opening the episode/movie"
+          "Open and start a Netflix movie or episode in the current tab before creating a party. Reload the Netflix watch page after installing or updating Watch Home."
       };
     }
 
@@ -247,7 +261,8 @@
     if (!active?.watchId) {
       return {
         ok: false,
-        error: "Open the Netflix watch page from the host invite first."
+        error:
+          "Open the Netflix watch page from the host invite first, then reload it after installing or updating Watch Home."
       };
     }
 
@@ -267,6 +282,7 @@
   async function startSession(nextSession) {
     intentionallyClosed = true;
     reconnectAllowed = false;
+    clearReconnectTimer();
     closeSocket();
 
     session = {
@@ -275,6 +291,7 @@
       status: "connecting",
       lastError: null
     };
+
     lastRoomState = null;
     lastSequence = null;
     participantCount = 0;
@@ -287,7 +304,6 @@
 
     intentionallyClosed = false;
     reconnectAllowed = true;
-
     await connectWebSocket(true);
     broadcastSession();
   }
@@ -295,12 +311,14 @@
   async function leaveParty() {
     intentionallyClosed = true;
     reconnectAllowed = false;
+    clearReconnectTimer();
 
     if (isSocketOpen()) {
       sendSocket({ type: MessageType.LEAVE });
     }
 
     closeSocket();
+
     session = null;
     lastRoomState = null;
     lastSequence = null;
@@ -312,7 +330,6 @@
 
     await browser.storage.local.remove("watchHomeSession");
     broadcastSession();
-
     intentionallyClosed = false;
   }
 
@@ -338,27 +355,26 @@
     closeSocket();
 
     const stored = await browser.storage.local.get("watchHomeClientId");
-    const clientId = stored.watchHomeClientId;
     const generation = ++socketGeneration;
     const query = new URLSearchParams({
       role: session.role,
-      clientId
+      clientId: stored.watchHomeClientId
     });
 
     session.connected = false;
     session.status = "connecting";
+    clearNetworkError();
     await persistSession();
     broadcastSession();
 
     const ws = new WebSocket(
       `${config.backendWsOrigin}/ws/${session.roomId}?${query.toString()}`
     );
-
     socket = ws;
 
     ws.addEventListener("open", () => {
-      if (generation !== socketGeneration) {
-        ws.close();
+      if (!isCurrentSocket(ws, generation)) {
+        safelyClose(ws, 1000, "Superseded connection");
         return;
       }
 
@@ -369,22 +385,29 @@
     });
 
     ws.addEventListener("message", (event) => {
-      if (generation !== socketGeneration) {
+      if (isCurrentSocket(ws, generation)) {
+        handleSocketMessage(event.data);
+      }
+    });
+
+    ws.addEventListener("error", () => {
+      if (!isCurrentSocket(ws, generation)) {
         return;
       }
 
-      handleSocketMessage(event.data);
+      // The close event owns connection state because WebSocket error gives no reason.
+      console.warn("Watch Home WebSocket reported a transport error.");
     });
 
     ws.addEventListener("close", (event) => {
-      if (generation !== socketGeneration) {
+      if (!isCurrentSocket(ws, generation)) {
         return;
       }
 
       stopClockSync();
       socket = null;
 
-      if ([4003, 4008].includes(event.code)) {
+      if (TERMINAL_CLOSE_CODES.has(event.code)) {
         reconnectAllowed = false;
       }
 
@@ -393,6 +416,14 @@
 
         if (session.status !== "error") {
           session.status = "disconnected";
+        }
+
+        if (
+          !intentionallyClosed &&
+          reconnectAllowed &&
+          session.status !== "error"
+        ) {
+          session.lastError = RECONNECTING_MESSAGE;
         }
 
         void persistSession();
@@ -408,19 +439,10 @@
         scheduleReconnect();
       }
     });
-
-    ws.addEventListener("error", () => {
-      if (session) {
-        session.lastError = "Could not reach the Watch Home server.";
-        void persistSession();
-        broadcastSession();
-      }
-    });
   }
 
   function handleSocketMessage(rawMessage) {
     let message;
-
     try {
       message = JSON.parse(rawMessage);
     } catch {
@@ -429,6 +451,10 @@
 
     switch (message.type) {
       case MessageType.WELCOME:
+        if (!session) {
+          return;
+        }
+
         session.connected = true;
         session.status = "connected";
         session.role = message.role;
@@ -443,7 +469,6 @@
         }
 
         void persistSession();
-
         broadcastSession();
 
         if (lastRoomState) {
@@ -461,29 +486,27 @@
           Date.now(),
           message.serverTime
         );
+        clearRecoveredNetworkError();
         break;
 
       case MessageType.ROOM_STATE:
-        if (!acceptRoomState(message.state)) {
-          return;
+        if (acceptRoomState(message.state)) {
+          sendToSessionContent({
+            type: MessageType.ROOM_STATE,
+            state: lastRoomState,
+            clockOffsetMs
+          });
         }
-
-        sendToSessionContent({
-          type: MessageType.ROOM_STATE,
-          state: lastRoomState,
-          clockOffsetMs
-        });
         break;
 
       case MessageType.HOST_OFFLINE:
-        if (!acceptRoomState(message.state)) {
-          return;
+        if (acceptRoomState(message.state)) {
+          sendToSessionContent({
+            type: MessageType.HOST_OFFLINE,
+            state: lastRoomState,
+            clockOffsetMs
+          });
         }
-
-        sendToSessionContent({
-          type: MessageType.HOST_OFFLINE,
-          state: lastRoomState
-        });
         break;
 
       case MessageType.PRESENCE:
@@ -491,17 +514,20 @@
         break;
 
       case MessageType.ERROR:
-        if (session) {
-          session.lastError = message.message ?? "Server rejected the request.";
-          session.status = "error";
-
-          if (message.retryable === false) {
-            reconnectAllowed = false;
-          }
-
-          void persistSession();
-          broadcastSession();
+        if (!session) {
+          return;
         }
+
+        session.lastError =
+          message.message ?? "Server rejected the request.";
+        session.status = "error";
+
+        if (message.retryable === false) {
+          reconnectAllowed = false;
+        }
+
+        void persistSession();
+        broadcastSession();
         break;
 
       default:
@@ -556,6 +582,35 @@
     });
   }
 
+  function clearNetworkError() {
+    if (
+      session &&
+      (
+        session.lastError === NETWORK_ERROR_MESSAGE ||
+        session.lastError === RECONNECTING_MESSAGE
+      )
+    ) {
+      session.lastError = null;
+    }
+  }
+
+  function clearRecoveredNetworkError() {
+    if (!session?.connected) {
+      return;
+    }
+
+    if (
+      session.lastError !== NETWORK_ERROR_MESSAGE &&
+      session.lastError !== RECONNECTING_MESSAGE
+    ) {
+      return;
+    }
+
+    session.lastError = null;
+    void persistSession();
+    broadcastSession();
+  }
+
   function startClockSync() {
     stopClockSync();
     clockTimer = setInterval(sendPing, config.clockSyncIntervalMs);
@@ -569,14 +624,12 @@
   }
 
   function sendPing() {
-    if (!isSocketOpen()) {
-      return;
+    if (isSocketOpen()) {
+      sendSocket({
+        type: MessageType.PING,
+        clientSentAt: Date.now()
+      });
     }
-
-    sendSocket({
-      type: MessageType.PING,
-      clientSentAt: Date.now()
-    });
   }
 
   function sendSocket(payload) {
@@ -584,7 +637,11 @@
       return;
     }
 
-    socket.send(JSON.stringify(payload));
+    try {
+      socket.send(JSON.stringify(payload));
+    } catch (error) {
+      console.warn("Watch Home WebSocket send failed", error);
+    }
   }
 
   function scheduleReconnect() {
@@ -595,10 +652,9 @@
       config.reconnectMaxMs,
       config.reconnectBaseMs * 2 ** exponent
     );
-    const jitter = Math.floor(Math.random() * 250);
-    const delay = baseDelay + jitter;
-    reconnectAttempt += 1;
+    const delay = baseDelay + Math.floor(Math.random() * 250);
 
+    reconnectAttempt += 1;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       void connectWebSocket(true);
@@ -615,17 +671,31 @@
   function closeSocket() {
     stopClockSync();
 
-    if (socket) {
-      socketGeneration += 1;
-
-      try {
-        socket.close(1000, "Client reconnecting");
-      } catch {
-        // The socket may already be closing.
-      }
-
-      socket = null;
+    if (!socket) {
+      return;
     }
+
+    const closingSocket = socket;
+    socketGeneration += 1;
+    socket = null;
+    safelyClose(closingSocket, 1000, "Client reconnecting");
+  }
+
+  function safelyClose(ws, code, reason) {
+    try {
+      if (
+        ws.readyState === WebSocket.OPEN ||
+        ws.readyState === WebSocket.CONNECTING
+      ) {
+        ws.close(code, reason);
+      }
+    } catch {
+      // The socket can transition state between the check and close().
+    }
+  }
+
+  function isCurrentSocket(ws, generation) {
+    return generation === socketGeneration && socket === ws;
   }
 
   function isSocketOpen() {
@@ -633,10 +703,12 @@
   }
 
   function isSocketUsable() {
-    return (
+    return Boolean(
       socket &&
-      (socket.readyState === WebSocket.OPEN ||
-        socket.readyState === WebSocket.CONNECTING)
+      (
+        socket.readyState === WebSocket.OPEN ||
+        socket.readyState === WebSocket.CONNECTING
+      )
     );
   }
 
@@ -678,11 +750,7 @@
   }
 
   async function maybeRebindRestoredSession(info) {
-    if (!session || !info?.tabId || !info.watchId) {
-      return;
-    }
-
-    if (sessionPort()) {
+    if (!session || !info?.tabId || !info.watchId || sessionPort()) {
       return;
     }
 
@@ -697,9 +765,9 @@
 
   async function buildStatus() {
     const active = await activeContent();
-    const bound = sessionPort()
-      ? contentPorts.get(sessionPort())
-      : null;
+    const boundPort = sessionPort();
+    const bound = boundPort ? contentPorts.get(boundPort) : null;
+
     const mismatch = Boolean(
       session?.role === "guest" &&
       lastRoomState?.watchId &&
@@ -717,7 +785,9 @@
       activeWatchId: active?.watchId ?? null,
       boundWatchId: bound?.watchId ?? null,
       partyWatchId: lastRoomState?.watchId ?? null,
-      hostOnline: lastRoomState?.mode !== "offline",
+      hostOnline: lastRoomState
+        ? lastRoomState.mode !== "offline"
+        : null,
       mismatch,
       invite: session?.roomId
         ? buildInvite(
@@ -733,7 +803,8 @@
             ? Math.round(clockRttMs)
             : null,
           reconnectAttempt,
-          sequence: lastSequence
+          sequence: lastSequence,
+          socketState: socket?.readyState ?? null
         },
         content: bound?.diagnostics ?? null,
         room: lastRoomState
@@ -821,7 +892,6 @@
       active: true,
       currentWindow: true
     });
-
     const url = `https://www.netflix.com/watch/${lastRoomState.watchId}`;
 
     if (activeTab?.id) {
