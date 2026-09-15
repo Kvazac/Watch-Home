@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Watch Home",
-  "version": "1.1.0",
-  "description": "Synchronize Netflix playback for a small private watch party.",
+  "version": "1.1.1",
+  "description": "Synchronize Netflix playback for a small private watch party. 1.1.1 - extension icon added",
 
   "icons": {
     "16": "icons/icon16.png",
