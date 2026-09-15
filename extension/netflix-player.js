@@ -1,6 +1,9 @@
 "use strict";
 
 (() => {
+  const REQUEST_EVENT = "watch-home:netflix-command";
+  const RESPONSE_EVENT = "watch-home:netflix-response";
+
   class NetflixPlayerAdapter {
     constructor() {
       this.video = null;
@@ -8,6 +11,9 @@
       this.listeners = new Map();
       this.monitorTimer = null;
       this.boundForwarders = new Map();
+
+      this.lastSeekAt = null;
+      this.lastSeekError = null;
     }
 
     start() {
@@ -16,13 +22,16 @@
       }
 
       this.attachCurrentVideo();
+
       this.monitorTimer = window.setInterval(() => {
         this.attachCurrentVideo();
 
         const nextWatchId = this.getWatchId();
+
         if (nextWatchId !== this.watchId) {
           const previousWatchId = this.watchId;
           this.watchId = nextWatchId;
+
           this.emit("navigation", {
             watchId: nextWatchId,
             previousWatchId
@@ -46,7 +55,9 @@
       }
 
       this.listeners.get(eventName).add(callback);
-      return () => this.listeners.get(eventName)?.delete(callback);
+
+      return () =>
+        this.listeners.get(eventName)?.delete(callback);
     }
 
     emit(eventName, payload) {
@@ -54,13 +65,18 @@
         try {
           callback(payload);
         } catch (error) {
-          console.error("Watch Home listener failed", error);
+          console.error(
+            "Watch Home listener failed",
+            error
+          );
         }
       }
     }
 
     getWatchId() {
-      const match = window.location.pathname.match(/^\/watch\/(\d+)/);
+      const match =
+        window.location.pathname.match(/^\/watch\/(\d+)/);
+
       return match?.[1] ?? null;
     }
 
@@ -79,11 +95,15 @@
 
       return {
         watchId,
-        position: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+        position: Number.isFinite(video.currentTime)
+          ? video.currentTime
+          : 0,
         playbackRate: Number.isFinite(video.playbackRate)
           ? video.playbackRate
           : 1,
-        mode: modeOverride ?? (video.paused ? "paused" : "playing")
+        mode:
+          modeOverride ??
+          (video.paused ? "paused" : "playing")
       };
     }
 
@@ -93,25 +113,34 @@
       return {
         watchId: this.getWatchId(),
         hasVideo: Boolean(video),
-        position: video && Number.isFinite(video.currentTime)
-          ? video.currentTime
-          : null,
-        duration: video && Number.isFinite(video.duration)
-          ? video.duration
-          : null,
+        position:
+          video && Number.isFinite(video.currentTime)
+            ? video.currentTime
+            : null,
+        duration:
+          video && Number.isFinite(video.duration)
+            ? video.duration
+            : null,
         paused: video?.paused ?? null,
-        playbackRate: video && Number.isFinite(video.playbackRate)
-          ? video.playbackRate
-          : null,
+        playbackRate:
+          video && Number.isFinite(video.playbackRate)
+            ? video.playbackRate
+            : null,
         readyState: video?.readyState ?? null,
-        networkState: video?.networkState ?? null
+        networkState: video?.networkState ?? null,
+        seekTransport: "netflix-player-api",
+        lastSeekAt: this.lastSeekAt,
+        lastSeekError: this.lastSeekError
       };
     }
 
     async play() {
       const video = this.getVideo();
+
       if (!video) {
-        throw new Error("Netflix video element is not available.");
+        throw new Error(
+          "Netflix video element is not available."
+        );
       }
 
       await video.play();
@@ -119,6 +148,7 @@
 
     pause() {
       const video = this.getVideo();
+
       if (!video) {
         return;
       }
@@ -128,35 +158,131 @@
 
     seek(positionSeconds) {
       const video = this.getVideo();
-      if (!video || !Number.isFinite(positionSeconds)) {
-        return;
+
+      if (
+        !video ||
+        !Number.isFinite(positionSeconds)
+      ) {
+        return false;
       }
 
-      const duration = Number.isFinite(video.duration) ? video.duration : null;
-      const upperBound = duration === null
-        ? Math.max(0, positionSeconds)
-        : Math.max(0, duration - 0.05);
+      const duration =
+        Number.isFinite(video.duration)
+          ? video.duration
+          : null;
 
-      video.currentTime = Math.min(
+      const upperBound =
+        duration === null
+          ? Math.max(0, positionSeconds)
+          : Math.max(0, duration - 0.05);
+
+      const targetSeconds = Math.min(
         Math.max(0, positionSeconds),
         upperBound
       );
+
+      const result = this.sendNetflixCommand(
+        "seek",
+        {
+          positionMs: Math.round(
+            targetSeconds * 1000
+          )
+        }
+      );
+
+      this.lastSeekAt = Date.now();
+
+      if (!result?.ok) {
+        this.lastSeekError =
+          result?.error ??
+          "Netflix player API did not accept the seek.";
+
+        console.warn(
+          "Watch Home Netflix seek failed:",
+          this.lastSeekError
+        );
+
+        return false;
+      }
+
+      this.lastSeekError = null;
+      return true;
     }
 
     setPlaybackRate(playbackRate) {
       const video = this.getVideo();
-      if (!video || !Number.isFinite(playbackRate)) {
+
+      if (
+        !video ||
+        !Number.isFinite(playbackRate)
+      ) {
         return;
       }
 
-      const safeRate = Math.min(4, Math.max(0.25, playbackRate));
-      if (Math.abs(video.playbackRate - safeRate) > 0.002) {
+      const safeRate = Math.min(
+        4,
+        Math.max(0.25, playbackRate)
+      );
+
+      if (
+        Math.abs(
+          video.playbackRate - safeRate
+        ) > 0.002
+      ) {
         video.playbackRate = safeRate;
       }
     }
 
+    sendNetflixCommand(command, payload = {}) {
+      const id = crypto.randomUUID();
+      let response = null;
+
+      const handleResponse = (event) => {
+        if (typeof event.detail !== "string") {
+          return;
+        }
+
+        try {
+          const candidate =
+            JSON.parse(event.detail);
+
+          if (candidate.id === id) {
+            response = candidate;
+          }
+        } catch {
+          // Ignore malformed page responses.
+        }
+      };
+
+      document.addEventListener(
+        RESPONSE_EVENT,
+        handleResponse
+      );
+
+      try {
+        document.dispatchEvent(
+          new CustomEvent(REQUEST_EVENT, {
+            detail: JSON.stringify({
+              id,
+              command,
+              payload
+            })
+          })
+        );
+      } finally {
+        document.removeEventListener(
+          RESPONSE_EVENT,
+          handleResponse
+        );
+      }
+
+      return response;
+    }
+
     attachCurrentVideo() {
-      const nextVideo = document.querySelector("video");
+      const nextVideo =
+        document.querySelector("video");
+
       if (nextVideo === this.video) {
         return;
       }
@@ -190,11 +316,20 @@
           });
         };
 
-        this.boundForwarders.set(eventName, forwarder);
-        this.video.addEventListener(eventName, forwarder);
+        this.boundForwarders.set(
+          eventName,
+          forwarder
+        );
+
+        this.video.addEventListener(
+          eventName,
+          forwarder
+        );
       }
 
-      this.emit("videochange", { video: this.video });
+      this.emit("videochange", {
+        video: this.video
+      });
     }
 
     detachVideo() {
@@ -202,8 +337,14 @@
         return;
       }
 
-      for (const [eventName, forwarder] of this.boundForwarders) {
-        this.video.removeEventListener(eventName, forwarder);
+      for (
+        const [eventName, forwarder]
+        of this.boundForwarders
+      ) {
+        this.video.removeEventListener(
+          eventName,
+          forwarder
+        );
       }
 
       this.boundForwarders.clear();
@@ -211,5 +352,86 @@
     }
   }
 
-  globalThis.NetflixPlayerAdapter = NetflixPlayerAdapter;
+  globalThis.NetflixPlayerAdapter =
+    NetflixPlayerAdapter;
 })();
+
+
+===== extension/manifest.json =====
+
+{
+  "manifest_version": 3,
+  "name": "Watch Home",
+  "version": "1.1.5",
+  "description": "Synchronize Netflix playback for a small private watch party.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "96": "icons/icon96.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "watch-home@Kvazac",
+      "strict_min_version": "140.0",
+      "update_url": "https://kvazac.github.io/Watch-Home/updates.json",
+      "data_collection_permissions": {
+        "required": [
+          "browsingActivity",
+          "websiteActivity"
+        ]
+      }
+    }
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.netflix.com/*",
+    "https://watch-home.ugnius-socials.workers.dev/*"
+  ],
+  "background": {
+    "scripts": [
+      "config.js",
+      "shared/protocol.js",
+      "shared/sync-math.js",
+      "background.js"
+    ],
+    "persistent": false
+  },
+  "action": {
+    "default_title": "Watch Home",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.netflix.com/watch/*"
+      ],
+      "js": [
+        "netflix-page-bridge.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.netflix.com/watch/*"
+      ],
+      "js": [
+        "shared/protocol.js",
+        "shared/sync-math.js",
+        "netflix-player.js",
+        "sync-controller.js",
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    }
+  ],
+  "incognito": "not_allowed"
+}
