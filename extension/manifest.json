@@ -52,13 +52,24 @@
         "https://www.netflix.com/watch/*"
       ],
       "js": [
+        "netflix-page-bridge.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.netflix.com/watch/*"
+      ],
+      "js": [
         "shared/protocol.js",
         "shared/sync-math.js",
         "netflix-player.js",
         "sync-controller.js",
         "content.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "world": "ISOLATED"
     }
   ],
   "incognito": "not_allowed"
