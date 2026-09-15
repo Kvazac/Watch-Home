@@ -216,7 +216,7 @@
       return {
         ok: false,
         error:
-          "Open and start a Netflix movie or episode in the current tab before creating a party."
+          "Open and start a Netflix movie or episode in the current tab before creating a party. \n Don't forget to reload the Netflix page after opening the episode/movie"
       };
     }
 
