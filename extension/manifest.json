@@ -1,16 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Watch Home",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "Synchronize Netflix playback for a small private watch party. 1.1.1 - extension icon added/ x.x.3 filename fixes",
-
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "96": "icons/icon96.png"
   },
-
   "browser_specific_settings": {
     "gecko": {
       "id": "watch-home@Kvazac",
@@ -24,16 +22,13 @@
       }
     }
   },
-
   "permissions": [
     "storage"
   ],
-
   "host_permissions": [
     "https://www.netflix.com/*",
     "https://watch-home.ugnius-socials.workers.dev/*"
   ],
-
   "background": {
     "scripts": [
       "config.js",
@@ -42,7 +37,6 @@
     ],
     "persistent": false
   },
-
   "action": {
     "default_title": "Watch Home",
     "default_popup": "popup/popup.html",
@@ -51,7 +45,6 @@
       "32": "icons/icon32.png"
     }
   },
-
   "content_scripts": [
     {
       "matches": [
@@ -66,6 +59,5 @@
       "run_at": "document_idle"
     }
   ],
-
   "incognito": "not_allowed"
 }
