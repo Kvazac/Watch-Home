@@ -4,25 +4,35 @@ import {
   clampAnchorTime,
   freezeCanonicalState,
   isValidClientId,
-  sanitizeHostState
+  sanitizeControlMode,
+  sanitizePlaybackState
 } from "./validation.js";
 
 const MAX_CONNECTIONS = 12;
 const MAX_MESSAGE_BYTES = 16 * 1024;
+const DEFAULT_CONTROL_MODE = "host-only";
 
 export class PartyRoom extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
+
     this.room = {
       hostClientId: null,
       canonical: null,
-      sequence: 0
+      sequence: 0,
+      controlMode: DEFAULT_CONTROL_MODE
     };
 
     this.ctx.blockConcurrencyWhile(async () => {
       const stored = await this.ctx.storage.get("room");
+
       if (stored) {
-        this.room = stored;
+        this.room = {
+          ...stored,
+          controlMode:
+            sanitizeControlMode(stored.controlMode) ??
+            DEFAULT_CONTROL_MODE
+        };
       }
     });
   }
@@ -60,6 +70,7 @@ export class PartyRoom extends DurableObject {
     }
 
     const assignedRole = await this.assignRole(desiredRole, clientId);
+
     if (!assignedRole) {
       server.accept();
       this.send(server, {
@@ -92,6 +103,7 @@ export class PartyRoom extends DurableObject {
       type: "WELCOME",
       role: assignedRole,
       state: this.room.canonical,
+      controlMode: this.room.controlMode,
       participantCount: this.openSockets().length,
       serverTime: Date.now()
     });
@@ -119,6 +131,7 @@ export class PartyRoom extends DurableObject {
     }
 
     let message;
+
     try {
       message = JSON.parse(rawMessage);
     } catch {
@@ -137,6 +150,11 @@ export class PartyRoom extends DurableObject {
         break;
 
       case "REQUEST_STATE":
+        this.send(webSocket, {
+          type: "ROOM_SETTINGS",
+          controlMode: this.room.controlMode
+        });
+
         if (this.room.canonical) {
           this.send(webSocket, {
             type: "ROOM_STATE",
@@ -146,14 +164,41 @@ export class PartyRoom extends DurableObject {
         break;
 
       case "HOST_STATE":
-        if (
-          attachment.role !== "host" ||
-          attachment.clientId !== this.room.hostClientId
-        ) {
+        if (!this.isHost(attachment)) {
           return;
         }
 
-        await this.updateCanonicalState(message);
+        await this.updateCanonicalState(message, attachment);
+        break;
+
+      case "CONTROL_STATE":
+        if (!this.canControl(attachment)) {
+          this.send(webSocket, {
+            type: "CONTROL_REJECTED",
+            reason:
+              this.room.controlMode === "host-only"
+                ? "Playback controls are currently host-only."
+                : "The host must be online for guest controls."
+          });
+
+          if (this.room.canonical) {
+            this.send(webSocket, {
+              type: "ROOM_STATE",
+              state: this.room.canonical
+            });
+          }
+          return;
+        }
+
+        await this.updateCanonicalState(message, attachment);
+        break;
+
+      case "SET_CONTROL_MODE":
+        if (!this.isHost(attachment)) {
+          return;
+        }
+
+        await this.updateControlMode(message.controlMode);
         break;
 
       case "LEAVE":
@@ -197,8 +242,55 @@ export class PartyRoom extends DurableObject {
     return "guest";
   }
 
-  async updateCanonicalState(message) {
-    const sanitized = sanitizeHostState(message.state);
+  isHost(attachment) {
+    return Boolean(
+      attachment.role === "host" &&
+      attachment.clientId === this.room.hostClientId
+    );
+  }
+
+  canControl(attachment) {
+    if (this.isHost(attachment)) {
+      return true;
+    }
+
+    return Boolean(
+      attachment.role === "guest" &&
+      this.room.controlMode === "everyone" &&
+      this.hasOnlineHost()
+    );
+  }
+
+  hasOnlineHost() {
+    return this.openSockets().some((webSocket) => {
+      const attachment = webSocket.deserializeAttachment() ?? {};
+
+      return (
+        attachment.role === "host" &&
+        attachment.clientId === this.room.hostClientId
+      );
+    });
+  }
+
+  async updateControlMode(value) {
+    const controlMode = sanitizeControlMode(value);
+
+    if (!controlMode || controlMode === this.room.controlMode) {
+      return;
+    }
+
+    this.room.controlMode = controlMode;
+    await this.persistRoom();
+
+    this.broadcast({
+      type: "ROOM_SETTINGS",
+      controlMode
+    });
+  }
+
+  async updateCanonicalState(message, attachment) {
+    const sanitized = sanitizePlaybackState(message.state);
+
     if (!sanitized) {
       return;
     }
@@ -213,7 +305,10 @@ export class PartyRoom extends DurableObject {
     this.room.canonical = {
       ...sanitized,
       anchorServerTime,
-      sequence: this.room.sequence
+      sequence: this.room.sequence,
+      sourceClientId: attachment.clientId ?? null,
+      sourceRole: attachment.role ?? null,
+      reason: String(message.reason ?? "").slice(0, 64)
     };
 
     await this.persistRoom();
@@ -227,10 +322,7 @@ export class PartyRoom extends DurableObject {
   async handleSocketGone(webSocket) {
     const attachment = webSocket.deserializeAttachment() ?? {};
 
-    if (
-      attachment.role === "host" &&
-      attachment.clientId === this.room.hostClientId
-    ) {
+    if (this.isHost(attachment)) {
       const serverNow = Date.now();
       this.room.canonical = freezeCanonicalState(
         this.room.canonical,
@@ -240,6 +332,9 @@ export class PartyRoom extends DurableObject {
       if (this.room.canonical) {
         this.room.sequence += 1;
         this.room.canonical.sequence = this.room.sequence;
+        this.room.canonical.sourceClientId = attachment.clientId ?? null;
+        this.room.canonical.sourceRole = "host";
+        this.room.canonical.reason = "host-offline";
       }
 
       await this.persistRoom();
@@ -257,7 +352,8 @@ export class PartyRoom extends DurableObject {
       this.room = {
         hostClientId: null,
         canonical: null,
-        sequence: 0
+        sequence: 0,
+        controlMode: DEFAULT_CONTROL_MODE
       };
       return;
     }
@@ -292,7 +388,7 @@ export class PartyRoom extends DurableObject {
     try {
       webSocket.send(JSON.stringify(payload));
     } catch {
-      // A closing socket can disappear between enumeration and send.
+      // The socket can close between enumeration and send.
     }
   }
 

@@ -21,7 +21,8 @@
   let stallTimer = null;
   let heartbeatTimer = null;
   let diagnosticsTimer = null;
-  let guestStateRequestedForConnection = false;
+  let stateRequestedForConnection = false;
+  let hostSeedTimer = null;
 
   function connectPort() {
     if (port) {
@@ -29,11 +30,10 @@
     }
 
     port = browser.runtime.connect({ name: "watch-home-netflix" });
-
     port.onMessage.addListener(handleBackgroundMessage);
     port.onDisconnect.addListener(() => {
       port = null;
-      guestStateRequestedForConnection = false;
+      stateRequestedForConnection = false;
 
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
@@ -73,23 +73,24 @@
 
         if (!session) {
           latestRoomState = null;
-          guestStateRequestedForConnection = false;
+          stateRequestedForConnection = false;
+          clearHostSeedTimer();
           controller.stop();
           controller.start();
           return;
         }
 
-        if (session.role === "host" && session.connected) {
-          sendHostState("session-ready");
+        if (session.connected && !stateRequestedForConnection) {
+          stateRequestedForConnection = true;
+          sendPortMessage({ type: MessageType.REQUEST_STATE });
         }
 
         if (
-          session.role === "guest" &&
+          session.role === "host" &&
           session.connected &&
-          !guestStateRequestedForConnection
+          !latestRoomState
         ) {
-          guestStateRequestedForConnection = true;
-          sendPortMessage({ type: MessageType.REQUEST_STATE });
+          scheduleInitialHostSeed();
         }
         break;
 
@@ -98,13 +99,17 @@
         controller.updateClockOffset(clockOffsetMs);
         break;
 
+      case MessageType.ROOM_SETTINGS:
+        if (session) {
+          session.controlMode = normalizeControlMode(message.controlMode);
+        }
+        break;
+
       case MessageType.ROOM_STATE:
         latestRoomState = message.state;
         clockOffsetMs = message.clockOffsetMs ?? clockOffsetMs;
-
-        if (session?.role === "guest") {
-          controller.applyRoomState(latestRoomState, clockOffsetMs);
-        }
+        clearHostSeedTimer();
+        controller.applyRoomState(latestRoomState, clockOffsetMs);
         break;
 
       case MessageType.HOST_OFFLINE:
@@ -115,12 +120,61 @@
         }
         break;
 
+      case MessageType.CONTROL_REJECTED:
+        if (latestRoomState) {
+          controller.applyRoomState(latestRoomState, clockOffsetMs);
+        }
+        break;
+
       default:
         break;
     }
   }
 
-  function sendHostState(reason, modeOverride = null) {
+  function normalizeControlMode(value) {
+    return value === "everyone" ? "everyone" : "host-only";
+  }
+
+  function canControlPlayback() {
+    if (!session?.connected) {
+      return false;
+    }
+
+    if (session.role === "host") {
+      return true;
+    }
+
+    return (
+      session.role === "guest" &&
+      normalizeControlMode(session.controlMode) === "everyone" &&
+      latestRoomState?.mode !== "offline"
+    );
+  }
+
+  function sendParticipantState(reason, modeOverride = null) {
+    if (!canControlPlayback() || controller.isSuppressingLocalEvents()) {
+      return false;
+    }
+
+    const state = player.getState(
+      modeOverride ?? (hostStalled ? "stalled" : null)
+    );
+
+    if (!state) {
+      return false;
+    }
+
+    controller.beginLocalControl();
+    sendPortMessage({
+      type: MessageType.CONTROL_STATE,
+      reason,
+      state
+    });
+
+    return true;
+  }
+
+  function sendHostSystemState(reason, modeOverride = null) {
     if (session?.role !== "host" || !session.connected) {
       return;
     }
@@ -140,7 +194,7 @@
     });
   }
 
-  function handleGuestLocalMutation() {
+  function handleUnauthorizedGuestMutation() {
     if (
       session?.role !== "guest" ||
       controller.isSuppressingLocalEvents() ||
@@ -152,76 +206,83 @@
     window.setTimeout(() => controller.reapplyNow(), 30);
   }
 
+  function handleManualPlaybackMutation(reason, modeOverride = null) {
+    if (controller.isSuppressingLocalEvents()) {
+      return;
+    }
+
+    if (sendParticipantState(reason, modeOverride)) {
+      return;
+    }
+
+    handleUnauthorizedGuestMutation();
+  }
+
+  function scheduleInitialHostSeed() {
+    if (hostSeedTimer !== null) {
+      return;
+    }
+
+    hostSeedTimer = window.setTimeout(() => {
+      hostSeedTimer = null;
+
+      if (
+        session?.role === "host" &&
+        session.connected &&
+        !latestRoomState
+      ) {
+        sendHostSystemState("session-ready");
+      }
+    }, 350);
+  }
+
+  function clearHostSeedTimer() {
+    if (hostSeedTimer !== null) {
+      window.clearTimeout(hostSeedTimer);
+      hostSeedTimer = null;
+    }
+  }
+
   function sendDiagnostics() {
     const playerDiagnostics = player.getDiagnostics();
-    let syncDiagnostics;
-
-    if (session?.role === "guest") {
-      syncDiagnostics = controller.getDiagnostics();
-    } else if (session?.role === "host") {
-      syncDiagnostics = {
-        mode: hostStalled ? "host-buffering" : "host-authority",
-        localPosition: playerDiagnostics.position,
-        predictedPosition: playerDiagnostics.position,
-        driftMs: 0,
-        localRate: playerDiagnostics.playbackRate,
-        canonicalRate: playerDiagnostics.playbackRate,
-        readyState: playerDiagnostics.readyState,
-        paused: playerDiagnostics.paused,
-        playLatencyMs: null,
-        seekLatencyMs: null,
-        hardCorrectionCount: 0,
-        softCorrectionCount: 0,
-        lastCorrectionAt: null,
-        sequence: latestRoomState?.sequence ?? null
-      };
-    } else {
-      syncDiagnostics = {
-        mode: "not-in-party"
-      };
-    }
+    const syncDiagnostics = session
+      ? controller.getDiagnostics()
+      : { mode: "not-in-party" };
 
     sendPortMessage({
       type: MessageType.DIAGNOSTICS,
       diagnostics: {
         sampledAt: Date.now(),
         player: playerDiagnostics,
-        sync: syncDiagnostics
+        sync: syncDiagnostics,
+        controlMode: normalizeControlMode(session?.controlMode),
+        canControl: canControlPlayback()
       }
     });
   }
 
   player.on("play", () => {
-    if (session?.role === "host" && !hostStalled) {
-      sendHostState("play", "playing");
-    } else {
-      handleGuestLocalMutation();
+    if (session?.role === "host" && hostStalled) {
+      hostStalled = false;
     }
+
+    handleManualPlaybackMutation("play", "playing");
   });
 
   player.on("pause", () => {
     if (session?.role === "host") {
       hostStalled = false;
-      sendHostState("pause", "paused");
-    } else {
-      handleGuestLocalMutation();
     }
+
+    handleManualPlaybackMutation("pause", "paused");
   });
 
   player.on("seeked", () => {
-    if (session?.role === "host") {
-      sendHostState("seek");
-    } else {
-      handleGuestLocalMutation();
-    }
+    handleManualPlaybackMutation("seek");
   });
 
   player.on("ratechange", () => {
-    if (session?.role === "host") {
-      sendHostState("ratechange");
-    } else {
-      handleGuestLocalMutation();
-    }
+    handleManualPlaybackMutation("ratechange");
   });
 
   function scheduleHostStall(video) {
@@ -242,7 +303,7 @@
         video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA
       ) {
         hostStalled = true;
-        sendHostState("stall", "stalled");
+        sendHostSystemState("stall", "stalled");
       }
     }, config.hostStallDebounceMs);
   }
@@ -258,20 +319,23 @@
 
     if (session?.role === "host" && hostStalled) {
       hostStalled = false;
-      sendHostState("stall-recovered", "playing");
+      sendHostSystemState("stall-recovered", "playing");
     }
 
-    if (session?.role === "guest") {
+    if (session) {
       sendPortMessage({
         type: MessageType.PLAYER_ERROR,
         message: null
       });
-      controller.reapplyNow();
+
+      if (!controller.isSuppressingLocalEvents()) {
+        controller.reapplyNow();
+      }
     }
   });
 
   player.on("canplay", () => {
-    if (session?.role === "guest") {
+    if (session && !controller.isSuppressingLocalEvents()) {
       controller.reapplyNow();
     }
   });
@@ -279,9 +343,18 @@
   player.on("navigation", ({ watchId }) => {
     announceContent();
     latestRoomState = null;
+    stateRequestedForConnection = false;
 
     if (session?.role === "host" && watchId) {
-      window.setTimeout(() => sendHostState("navigation"), 500);
+      window.setTimeout(
+        () => sendHostSystemState("navigation"),
+        500
+      );
+    } else if (session?.role === "guest") {
+      window.setTimeout(
+        () => sendPortMessage({ type: MessageType.REQUEST_STATE }),
+        250
+      );
     }
   });
 
@@ -289,29 +362,42 @@
     announceContent();
 
     if (session?.role === "host") {
-      window.setTimeout(() => sendHostState("videochange"), 250);
+      window.setTimeout(
+        () => sendHostSystemState("videochange"),
+        250
+      );
     } else if (session?.role === "guest") {
       window.setTimeout(() => controller.reapplyNow(), 250);
     }
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      announceContent();
+    if (document.hidden) {
+      return;
+    }
 
-      if (session?.role === "guest") {
-        sendPortMessage({ type: MessageType.REQUEST_STATE });
-        controller.reapplyNow();
-      } else if (session?.role === "host") {
-        sendHostState("visibility-resume");
-      }
+    announceContent();
+
+    if (!session) {
+      return;
+    }
+
+    sendPortMessage({ type: MessageType.REQUEST_STATE });
+
+    if (session.role === "host" && session.controlMode === "host-only") {
+      window.setTimeout(
+        () => sendHostSystemState("visibility-resume"),
+        100
+      );
+    } else {
+      window.setTimeout(() => controller.reapplyNow(), 100);
     }
   });
 
   window.addEventListener("pageshow", () => {
     announceContent();
 
-    if (session?.role === "guest") {
+    if (session) {
       sendPortMessage({ type: MessageType.REQUEST_STATE });
     }
   });
@@ -321,8 +407,12 @@
   connectPort();
 
   heartbeatTimer = window.setInterval(() => {
-    if (session?.role === "host" && session.connected) {
-      sendHostState("heartbeat");
+    if (
+      session?.role === "host" &&
+      session.connected &&
+      normalizeControlMode(session.controlMode) === "host-only"
+    ) {
+      sendHostSystemState("heartbeat");
     }
   }, config.heartbeatIntervalMs);
 
@@ -332,6 +422,8 @@
   );
 
   window.addEventListener("pagehide", () => {
+    clearHostSeedTimer();
+
     if (heartbeatTimer !== null) {
       window.clearInterval(heartbeatTimer);
     }

@@ -6,7 +6,9 @@ import {
   freezeCanonicalState,
   isValidClientId,
   isValidRoomId,
-  sanitizeHostState
+  sanitizeControlMode,
+  sanitizeHostState,
+  sanitizePlaybackState
 } from "../worker/src/validation.js";
 
 test("room IDs accept the intended 12-character alphabet", () => {
@@ -23,10 +25,10 @@ test("client IDs require UUID v4", () => {
   assert.equal(isValidClientId("not-a-uuid"), false);
 });
 
-test("host state validation accepts all canonical modes", () => {
+test("playback state validation accepts all canonical modes", () => {
   for (const mode of ["playing", "paused", "stalled", "offline"]) {
     assert.deepEqual(
-      sanitizeHostState({
+      sanitizePlaybackState({
         watchId: "81234567",
         position: 120.5,
         playbackRate: 1,
@@ -42,9 +44,20 @@ test("host state validation accepts all canonical modes", () => {
   }
 });
 
-test("host state validation rejects unsafe values", () => {
+test("legacy host-state alias matches playback-state validation", () => {
+  const state = {
+    watchId: "81234567",
+    position: 120.5,
+    playbackRate: 1,
+    mode: "playing"
+  };
+
+  assert.deepEqual(sanitizeHostState(state), sanitizePlaybackState(state));
+});
+
+test("playback state validation rejects unsafe values", () => {
   assert.equal(
-    sanitizeHostState({
+    sanitizePlaybackState({
       watchId: "bad",
       position: 120,
       playbackRate: 1,
@@ -54,7 +67,7 @@ test("host state validation rejects unsafe values", () => {
   );
 
   assert.equal(
-    sanitizeHostState({
+    sanitizePlaybackState({
       watchId: "81234567",
       position: -1,
       playbackRate: 1,
@@ -64,7 +77,7 @@ test("host state validation rejects unsafe values", () => {
   );
 
   assert.equal(
-    sanitizeHostState({
+    sanitizePlaybackState({
       watchId: "81234567",
       position: 120,
       playbackRate: 99,
@@ -72,6 +85,13 @@ test("host state validation rejects unsafe values", () => {
     }),
     null
   );
+});
+
+test("control mode validation only accepts supported policies", () => {
+  assert.equal(sanitizeControlMode("host-only"), "host-only");
+  assert.equal(sanitizeControlMode("everyone"), "everyone");
+  assert.equal(sanitizeControlMode("guests"), null);
+  assert.equal(sanitizeControlMode(null), null);
 });
 
 test("anchor time accepts reasonable client clock estimates", () => {
