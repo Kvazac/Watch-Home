@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 2;
 export const SERVER_RELEASE = "1.2.0";
-export const SUPPORTED_CLIENT_VERSIONS = Object.freeze(["1.2.0"]);
+export const SUPPORTED_CLIENT_VERSIONS = manifest.version;
 
 export function checkClientCompatibility(protocolValue, clientVersion) {
   const protocolVersion = Number(protocolValue);
