@@ -154,7 +154,10 @@
   }
 
   function sendParticipantState(reason, modeOverride = null) {
-    if (!canControlPlayback() || controller.isSuppressingLocalEvents()) {
+    if (
+      !canControlPlayback() ||
+      controller.isSuppressingLocalEvents(reason)
+    ) {
       return false;
     }
 
@@ -196,10 +199,10 @@
     });
   }
 
-  function handleUnauthorizedGuestMutation() {
+  function handleUnauthorizedGuestMutation(reason) {
     if (
       session?.role !== "guest" ||
-      controller.isSuppressingLocalEvents() ||
+      controller.isSuppressingLocalEvents(reason) ||
       !latestRoomState
     ) {
       return;
@@ -209,7 +212,7 @@
   }
 
   function handleManualPlaybackMutation(reason, modeOverride = null) {
-    if (controller.isSuppressingLocalEvents()) {
+    if (controller.isSuppressingLocalEvents(reason)) {
       return;
     }
 
@@ -217,7 +220,7 @@
       return;
     }
 
-    handleUnauthorizedGuestMutation();
+    handleUnauthorizedGuestMutation(reason);
   }
 
   function scheduleInitialHostSeed() {
@@ -330,14 +333,14 @@
         message: null
       });
 
-      if (!controller.isSuppressingLocalEvents()) {
+      if (!controller.isSuppressingLocalEvents("playing")) {
         controller.reapplyNow();
       }
     }
   });
 
   player.on("canplay", () => {
-    if (session && !controller.isSuppressingLocalEvents()) {
+    if (session) {
       controller.reapplyNow();
     }
   });

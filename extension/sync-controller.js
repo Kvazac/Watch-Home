@@ -11,7 +11,7 @@
       this.latestState = null;
       this.clockOffsetMs = 0;
       this.tickTimer = null;
-      this.remoteActionUntil = 0;
+      this.remoteEventSuppressions = new Map();
       this.localControlUntil = 0;
       this.hardCorrectionCooldownUntil = 0;
       this.correctionActive = false;
@@ -44,6 +44,7 @@
       }
 
       this.restoreCanonicalRate();
+      this.remoteEventSuppressions.clear();
       this.localControlUntil = 0;
       this.latestState = null;
       this.lastDiagnostics = this.emptyDiagnostics("idle");
@@ -84,8 +85,53 @@
       this.localControlUntil = 0;
     }
 
-    isSuppressingLocalEvents() {
-      return performance.now() < this.remoteActionUntil;
+    suppressNextLocalEvent(eventName, durationMs = 1200) {
+      if (!eventName) {
+        return;
+      }
+
+      const now = performance.now();
+      const duration = Number.isFinite(durationMs)
+        ? Math.max(100, Math.min(5000, durationMs))
+        : 1200;
+      const existing = this.remoteEventSuppressions.get(eventName);
+      const count =
+        existing && existing.expiresAt > now
+          ? existing.count + 1
+          : 1;
+
+      this.remoteEventSuppressions.set(eventName, {
+        count,
+        expiresAt: now + duration
+      });
+    }
+
+    isSuppressingLocalEvents(eventName) {
+      if (!eventName) {
+        return false;
+      }
+
+      const suppression = this.remoteEventSuppressions.get(eventName);
+
+      if (!suppression) {
+        return false;
+      }
+
+      if (performance.now() >= suppression.expiresAt) {
+        this.remoteEventSuppressions.delete(eventName);
+        return false;
+      }
+
+      if (suppression.count <= 1) {
+        this.remoteEventSuppressions.delete(eventName);
+      } else {
+        this.remoteEventSuppressions.set(eventName, {
+          ...suppression,
+          count: suppression.count - 1
+        });
+      }
+
+      return true;
     }
 
     predictPosition(state, additionalLatencyMs = 0) {
@@ -221,11 +267,17 @@
         this.correctionActive &&
         Math.abs(video.playbackRate - targetRate) < 0.002;
 
-      this.remoteActionUntil = performance.now() + 300;
-      this.player.setPlaybackRate(targetRate);
+      const rateChanged =
+        Math.abs(video.playbackRate - targetRate) >= 0.002;
+
+      if (rateChanged) {
+        this.suppressNextLocalEvent("ratechange", 1000);
+        this.player.setPlaybackRate(targetRate);
+      }
+
       this.correctionActive = true;
 
-      if (!alreadyCorrecting) {
+      if (!alreadyCorrecting && rateChanged) {
         this.softCorrectionCount += 1;
         this.lastCorrectionAt = Date.now();
       }
@@ -252,12 +304,12 @@
       this.restoreCanonicalRate();
 
       if (!video.paused) {
-        this.remoteActionUntil = performance.now() + 350;
+        this.suppressNextLocalEvent("pause", 1200);
         this.player.pause();
       }
 
       if (Math.abs(driftSeconds) > 0.08) {
-        this.remoteActionUntil = performance.now() + 650;
+        this.suppressNextLocalEvent("seek", 2500);
         this.pendingSeekStartedAt = performance.now();
         this.player.seek(target);
       }
@@ -287,12 +339,12 @@
         expectedLatencyMs
       );
 
-      this.remoteActionUntil = performance.now() + 1500;
       this.hardCorrectionCooldownUntil = performance.now() + 1500;
       this.hardCorrectionCount += 1;
       this.lastCorrectionAt = Date.now();
 
       if (Math.abs(predictiveTarget - video.currentTime) > 0.08) {
+        this.suppressNextLocalEvent("seek", 2500);
         this.pendingSeekStartedAt = performance.now();
         this.player.seek(predictiveTarget);
       }
@@ -313,7 +365,8 @@
     }
 
     async requestPlay() {
-      this.remoteActionUntil = performance.now() + 1000;
+      this.suppressNextLocalEvent("play", 1500);
+      this.suppressNextLocalEvent("playing", 2000);
       this.pendingPlayStartedAt = performance.now();
 
       try {
@@ -353,8 +406,18 @@
 
     restoreCanonicalRate() {
       if (this.latestState) {
-        this.remoteActionUntil = performance.now() + 250;
-        this.player.setPlaybackRate(this.latestState.playbackRate);
+        const video = this.player.getVideo();
+        const canonicalRate = this.latestState.playbackRate;
+
+        if (
+          video &&
+          Number.isFinite(video.playbackRate) &&
+          Number.isFinite(canonicalRate) &&
+          Math.abs(video.playbackRate - canonicalRate) >= 0.002
+        ) {
+          this.suppressNextLocalEvent("ratechange", 1000);
+          this.player.setPlaybackRate(canonicalRate);
+        }
       }
 
       this.correctionActive = false;
