@@ -12,6 +12,7 @@
       this.clockOffsetMs = 0;
       this.tickTimer = null;
       this.remoteActionUntil = 0;
+      this.localControlUntil = 0;
       this.hardCorrectionCooldownUntil = 0;
       this.correctionActive = false;
       this.withinExitBandSince = null;
@@ -43,6 +44,7 @@
       }
 
       this.restoreCanonicalRate();
+      this.localControlUntil = 0;
       this.latestState = null;
       this.lastDiagnostics = this.emptyDiagnostics("idle");
     }
@@ -67,6 +69,19 @@
 
     reapplyNow() {
       this.tick(true);
+    }
+
+    beginLocalControl(durationMs = 900) {
+      const duration = Number.isFinite(durationMs)
+        ? Math.max(200, Math.min(2000, durationMs))
+        : 900;
+
+      this.localControlUntil = performance.now() + duration;
+      this.restoreCanonicalRate();
+    }
+
+    cancelLocalControl() {
+      this.localControlUntil = 0;
     }
 
     isSuppressingLocalEvents() {
@@ -109,6 +124,20 @@
           "wrong-title",
           video,
           state
+        );
+        return;
+      }
+
+      if (performance.now() < this.localControlUntil) {
+        const predictedPosition = this.predictPosition(state);
+        const driftSeconds = predictedPosition - video.currentTime;
+
+        this.lastDiagnostics = this.createDiagnostics(
+          "local-control",
+          video,
+          state,
+          predictedPosition,
+          driftSeconds
         );
         return;
       }

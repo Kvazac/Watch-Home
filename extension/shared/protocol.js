@@ -1,6 +1,7 @@
 "use strict";
 
 (() => {
+  const PROTOCOL_VERSION = 2;
   const ROOM_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
   const ROOM_LENGTH = 12;
   const ROOM_PATTERN = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{12}$/;
@@ -60,6 +61,7 @@
   }
 
   globalThis.WatchHomeProtocol = Object.freeze({
+    PROTOCOL_VERSION,
     MessageType,
     ROOM_PATTERN,
     createClientId,

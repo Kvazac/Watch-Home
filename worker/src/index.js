@@ -1,4 +1,9 @@
 import { PartyRoom } from "./party-room.js";
+import {
+  PROTOCOL_VERSION,
+  SERVER_RELEASE,
+  SUPPORTED_CLIENT_VERSIONS
+} from "./compatibility.js";
 import { isValidRoomId } from "./validation.js";
 
 export { PartyRoom };
@@ -11,8 +16,9 @@ export default {
       return Response.json({
         ok: true,
         service: "watch-home",
-        protocol: 2,
-        release: "1.2.0"
+        protocol: PROTOCOL_VERSION,
+        release: SERVER_RELEASE,
+        supportedClientVersions: SUPPORTED_CLIENT_VERSIONS
       });
     }
 

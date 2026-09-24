@@ -21,6 +21,9 @@ const statusText = document.querySelector("#status-text");
 const statusDot = document.querySelector("#status-dot");
 const roleText = document.querySelector("#role-text");
 const participantsText = document.querySelector("#participants-text");
+const controlModePanel = document.querySelector("#control-mode-panel");
+const controlModeSelect = document.querySelector("#control-mode-select");
+const controlModeHelp = document.querySelector("#control-mode-help");
 const messageBox = document.querySelector("#message");
 
 const diagnosticsFields = {
@@ -98,6 +101,28 @@ openCorrectButton.addEventListener("click", async () => {
   await send({ type: "POPUP_OPEN_CORRECT" });
 });
 
+controlModeSelect.addEventListener("change", async () => {
+  if (status?.session?.role !== "host") {
+    return;
+  }
+
+  controlModeSelect.disabled = true;
+
+  const response = await send({
+    type: "POPUP_SET_CONTROL_MODE",
+    controlMode: controlModeSelect.value
+  });
+
+  if (!response?.ok) {
+    showTransientMessage(
+      response?.error ?? "Could not change playback permissions.",
+      true
+    );
+  }
+
+  await refresh();
+});
+
 copyButton.addEventListener("click", async () => {
   if (!status?.invite) {
     return;
@@ -173,12 +198,30 @@ function render() {
   statusText.textContent = statusLabel(activeSession.status);
   statusDot.classList.toggle("connected", activeSession.connected);
 
-roleText.textContent =
-  activeSession.role === "host"
-    ? "You are the host. Your playback controls the party."
-    : status.hostOnline === false
-      ? "You are a guest. Waiting for the host to reconnect."
-      : "You are a guest. Playback follows the host.";
+const everyoneControls = status.controlMode === "everyone";
+
+  roleText.textContent =
+    activeSession.role === "host"
+      ? everyoneControls
+        ? "You are the host. Everyone can control playback."
+        : "You are the host. Playback controls are host-only."
+      : status.hostOnline === false
+        ? "You are a guest. Waiting for the host to reconnect."
+        : everyoneControls
+          ? "You are a guest. Everyone can control playback."
+          : "You are a guest. Playback follows the host.";
+
+  controlModePanel.hidden = false;
+  controlModeSelect.value =
+    status.controlMode === "everyone" ? "everyone" : "host-only";
+  controlModeSelect.disabled =
+    activeSession.role !== "host" || !activeSession.connected;
+  controlModeHelp.textContent =
+    activeSession.role === "host"
+      ? "Choose whether guests may play, pause, seek, and change playback speed."
+      : status.controlMode === "everyone"
+        ? "The host currently allows guest playback controls."
+        : "Only the host can control playback.";
 
   participantsText.textContent =
     status.participantCount > 0
@@ -266,6 +309,8 @@ function statusLabel(value) {
       return "Connecting…";
     case "configuration-error":
       return "Setup required";
+    case "compatibility-error":
+      return "Update required";
     case "error":
       return "Connection error";
     default:
@@ -280,6 +325,7 @@ function setBusy(busy) {
     leaveButton,
     reconnectButton,
     openCorrectButton,
+    controlModeSelect,
     copyDiagnosticsButton
   ]) {
     button.disabled = busy;

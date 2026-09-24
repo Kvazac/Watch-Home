@@ -121,6 +121,8 @@
         break;
 
       case MessageType.CONTROL_REJECTED:
+        controller.cancelLocalControl();
+
         if (latestRoomState) {
           controller.applyRoomState(latestRoomState, clockOffsetMs);
         }

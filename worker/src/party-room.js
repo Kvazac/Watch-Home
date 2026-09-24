@@ -1,6 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 
 import {
+  PROTOCOL_VERSION,
+  SERVER_RELEASE,
+  checkClientCompatibility,
+  checkRoomClientCompatibility
+} from "./compatibility.js";
+import {
   clampAnchorTime,
   freezeCanonicalState,
   isValidClientId,
@@ -20,20 +26,36 @@ export class PartyRoom extends DurableObject {
       hostClientId: null,
       canonical: null,
       sequence: 0,
-      controlMode: DEFAULT_CONTROL_MODE
+      controlMode: DEFAULT_CONTROL_MODE,
+      protocolVersion: PROTOCOL_VERSION,
+      clientVersion: null
     };
 
     this.ctx.blockConcurrencyWhile(async () => {
       const stored = await this.ctx.storage.get("room");
 
-      if (stored) {
-        this.room = {
-          ...stored,
-          controlMode:
-            sanitizeControlMode(stored.controlMode) ??
-            DEFAULT_CONTROL_MODE
-        };
+      if (!stored) {
+        return;
       }
+
+      const storedCompatibility = checkClientCompatibility(
+        stored.protocolVersion,
+        stored.clientVersion
+      );
+
+      if (!storedCompatibility.ok) {
+        await this.ctx.storage.deleteAll();
+        return;
+      }
+
+      this.room = {
+        ...stored,
+        controlMode:
+          sanitizeControlMode(stored.controlMode) ??
+          DEFAULT_CONTROL_MODE,
+        protocolVersion: PROTOCOL_VERSION,
+        clientVersion: storedCompatibility.clientVersion
+      };
     });
   }
 
@@ -45,6 +67,8 @@ export class PartyRoom extends DurableObject {
     const url = new URL(request.url);
     const desiredRole = url.searchParams.get("role");
     const clientId = url.searchParams.get("clientId");
+    const clientVersion = url.searchParams.get("clientVersion");
+    const protocolVersion = url.searchParams.get("protocolVersion");
 
     if (!["host", "guest"].includes(desiredRole) || !isValidClientId(clientId)) {
       return new Response("Invalid connection parameters.", { status: 400 });
@@ -53,50 +77,70 @@ export class PartyRoom extends DurableObject {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    if (this.openSockets().length >= MAX_CONNECTIONS) {
-      server.accept();
-      this.send(server, {
-        type: "ERROR",
-        code: "ROOM_FULL",
-        retryable: false,
-        message: "This room is full."
-      });
-      server.close(4008, "Room full");
+    const compatibility = checkClientCompatibility(
+      protocolVersion,
+      clientVersion
+    );
 
-      return new Response(null, {
-        status: 101,
-        webSocket: client
-      });
+    if (!compatibility.ok) {
+      return this.rejectSocket(
+        client,
+        server,
+        compatibility.code,
+        compatibility.message,
+        compatibility.closeCode
+      );
     }
 
-    const assignedRole = await this.assignRole(desiredRole, clientId);
+    const roomCompatibility = checkRoomClientCompatibility(
+      this.room.clientVersion,
+      compatibility.clientVersion
+    );
+
+    if (!roomCompatibility.ok) {
+      return this.rejectSocket(
+        client,
+        server,
+        roomCompatibility.code,
+        roomCompatibility.message,
+        roomCompatibility.closeCode
+      );
+    }
+
+    if (this.openSockets().length >= MAX_CONNECTIONS) {
+      return this.rejectSocket(
+        client,
+        server,
+        "ROOM_FULL",
+        "This room is full.",
+        4008
+      );
+    }
+
+    const assignedRole = await this.assignRole(
+      desiredRole,
+      clientId,
+      compatibility.clientVersion
+    );
 
     if (!assignedRole) {
-      server.accept();
-      this.send(server, {
-        type: "ERROR",
-        code:
-          desiredRole === "host"
-            ? "HOST_CONFLICT"
-            : "ROOM_NOT_READY",
-        retryable: false,
-        message:
-          desiredRole === "host"
-            ? "This room already has a different host."
-            : "The host is no longer available for this room."
-      });
-      server.close(4003, "Role rejected");
-
-      return new Response(null, {
-        status: 101,
-        webSocket: client
-      });
+      return this.rejectSocket(
+        client,
+        server,
+        desiredRole === "host" ? "HOST_CONFLICT" : "ROOM_NOT_READY",
+        desiredRole === "host"
+          ? "This room already has a different host."
+          : "The host is no longer available for this room.",
+        4003
+      );
     }
 
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({
       clientId,
-      role: assignedRole
+      role: assignedRole,
+      clientVersion: compatibility.clientVersion,
+      protocolVersion: PROTOCOL_VERSION
     });
 
     this.send(server, {
@@ -105,7 +149,10 @@ export class PartyRoom extends DurableObject {
       state: this.room.canonical,
       controlMode: this.room.controlMode,
       participantCount: this.openSockets().length,
-      serverTime: Date.now()
+      serverTime: Date.now(),
+      protocolVersion: PROTOCOL_VERSION,
+      serverRelease: SERVER_RELEASE,
+      roomClientVersion: this.room.clientVersion
     });
 
     this.broadcastPresence();
@@ -139,6 +186,20 @@ export class PartyRoom extends DurableObject {
     }
 
     const attachment = webSocket.deserializeAttachment() ?? {};
+
+    if (
+      attachment.protocolVersion !== PROTOCOL_VERSION ||
+      attachment.clientVersion !== this.room.clientVersion
+    ) {
+      this.send(webSocket, {
+        type: "ERROR",
+        code: "CLIENT_VERSION_MISMATCH",
+        retryable: false,
+        message: "This connection no longer matches the party compatibility lock."
+      });
+      webSocket.close(4409, "Compatibility mismatch");
+      return;
+    }
 
     switch (message.type) {
       case "PING":
@@ -218,7 +279,7 @@ export class PartyRoom extends DurableObject {
     await this.handleSocketGone(webSocket);
   }
 
-  async assignRole(desiredRole, clientId) {
+  async assignRole(desiredRole, clientId, clientVersion) {
     if (desiredRole === "host") {
       if (
         this.room.hostClientId &&
@@ -229,13 +290,18 @@ export class PartyRoom extends DurableObject {
 
       if (!this.room.hostClientId) {
         this.room.hostClientId = clientId;
-        await this.persistRoom();
       }
 
+      if (!this.room.clientVersion) {
+        this.room.clientVersion = clientVersion;
+      }
+
+      this.room.protocolVersion = PROTOCOL_VERSION;
+      await this.persistRoom();
       return "host";
     }
 
-    if (!this.room.hostClientId) {
+    if (!this.room.hostClientId || !this.room.clientVersion) {
       return null;
     }
 
@@ -353,7 +419,9 @@ export class PartyRoom extends DurableObject {
         hostClientId: null,
         canonical: null,
         sequence: 0,
-        controlMode: DEFAULT_CONTROL_MODE
+        controlMode: DEFAULT_CONTROL_MODE,
+        protocolVersion: PROTOCOL_VERSION,
+        clientVersion: null
       };
       return;
     }
@@ -376,6 +444,25 @@ export class PartyRoom extends DurableObject {
           webSocket !== excluded &&
           webSocket.readyState === 1
       );
+  }
+
+  rejectSocket(client, server, code, message, closeCode) {
+    server.accept();
+    this.send(server, {
+      type: "ERROR",
+      code,
+      retryable: false,
+      message,
+      protocolVersion: PROTOCOL_VERSION,
+      serverRelease: SERVER_RELEASE,
+      roomClientVersion: this.room.clientVersion
+    });
+    server.close(closeCode, code);
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client
+    });
   }
 
   broadcast(payload) {
