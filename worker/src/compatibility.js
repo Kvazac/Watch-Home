@@ -1,6 +1,11 @@
+import {
+  SERVER_RELEASE,
+  SUPPORTED_CLIENT_VERSIONS
+} from "./release.js";
+
+export { SERVER_RELEASE, SUPPORTED_CLIENT_VERSIONS };
+
 export const PROTOCOL_VERSION = 2;
-export const SERVER_RELEASE = "1.2.0";
-export const SUPPORTED_CLIENT_VERSIONS = manifest.version;
 
 export function checkClientCompatibility(protocolValue, clientVersion) {
   const protocolVersion = Number(protocolValue);
@@ -33,7 +38,6 @@ export function checkClientCompatibility(protocolValue, clientVersion) {
     clientVersion: version
   };
 }
-
 
 export function checkRoomClientCompatibility(roomClientVersion, clientVersion) {
   const roomVersion =

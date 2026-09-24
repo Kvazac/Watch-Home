@@ -10,38 +10,46 @@ import {
   checkRoomClientCompatibility
 } from "../worker/src/compatibility.js";
 
-test("v1.2.0 compatibility constants stay aligned", async () => {
-  const manifest = JSON.parse(
-    await fs.readFile("extension/manifest.json", "utf8")
-  );
+const manifest = JSON.parse(
+  await fs.readFile("extension/manifest.json", "utf8")
+);
+
+test("compatibility metadata stays aligned with the current release", async () => {
   const protocolSource = await fs.readFile(
     "extension/shared/protocol.js",
     "utf8"
   );
 
   assert.equal(PROTOCOL_VERSION, 2);
-  assert.equal(SERVER_RELEASE, "1.2.0");
-  assert.deepEqual(SUPPORTED_CLIENT_VERSIONS, ["1.2.0"]);
-  assert.equal(manifest.version, "1.2.0");
+  assert.equal(SERVER_RELEASE, manifest.version);
+  assert.ok(SUPPORTED_CLIENT_VERSIONS.includes(manifest.version));
+  assert.ok(SUPPORTED_CLIENT_VERSIONS.length >= 1);
+  assert.ok(SUPPORTED_CLIENT_VERSIONS.length <= 3);
   assert.match(
     protocolSource,
-    /const PROTOCOL_VERSION = 2;/
+    new RegExp(`const PROTOCOL_VERSION = ${PROTOCOL_VERSION};`)
   );
 });
 
-test("matching protocol and client version are accepted", () => {
+test("matching protocol and current client version are accepted", () => {
   assert.deepEqual(
-    checkClientCompatibility("2", "1.2.0"),
+    checkClientCompatibility(
+      String(PROTOCOL_VERSION),
+      manifest.version
+    ),
     {
       ok: true,
-      protocolVersion: 2,
-      clientVersion: "1.2.0"
+      protocolVersion: PROTOCOL_VERSION,
+      clientVersion: manifest.version
     }
   );
 });
 
 test("protocol mismatch is terminal", () => {
-  const result = checkClientCompatibility("1", "1.2.0");
+  const result = checkClientCompatibility(
+    String(PROTOCOL_VERSION + 1),
+    manifest.version
+  );
 
   assert.equal(result.ok, false);
   assert.equal(result.code, "PROTOCOL_MISMATCH");
@@ -49,7 +57,16 @@ test("protocol mismatch is terminal", () => {
 });
 
 test("unsupported client version is terminal", () => {
-  const result = checkClientCompatibility("2", "1.1.6");
+  const unsupportedVersion = "999.999.999";
+  assert.equal(
+    SUPPORTED_CLIENT_VERSIONS.includes(unsupportedVersion),
+    false
+  );
+
+  const result = checkClientCompatibility(
+    String(PROTOCOL_VERSION),
+    unsupportedVersion
+  );
 
   assert.equal(result.ok, false);
   assert.equal(result.code, "CLIENT_VERSION_MISMATCH");
@@ -63,19 +80,53 @@ test("missing compatibility metadata is rejected", () => {
   );
 });
 
-
-test("room version lock accepts the host version and rejects mixed versions", () => {
+test("room version lock accepts same-version clients and rejects mixed versions", () => {
   assert.deepEqual(
-    checkRoomClientCompatibility("1.2.0", "1.2.0"),
+    checkRoomClientCompatibility(
+      manifest.version,
+      manifest.version
+    ),
     {
       ok: true,
-      roomClientVersion: "1.2.0",
-      clientVersion: "1.2.0"
+      roomClientVersion: manifest.version,
+      clientVersion: manifest.version
     }
   );
 
-  const mismatch = checkRoomClientCompatibility("1.2.0", "1.2.1");
+  const differentVersion =
+    manifest.version === "999.999.998"
+      ? "999.999.997"
+      : "999.999.998";
+
+  const mismatch = checkRoomClientCompatibility(
+    manifest.version,
+    differentVersion
+  );
+
   assert.equal(mismatch.ok, false);
-  assert.equal(mismatch.code, "ROOM_CLIENT_VERSION_MISMATCH");
+  assert.equal(
+    mismatch.code,
+    "ROOM_CLIENT_VERSION_MISMATCH"
+  );
   assert.equal(mismatch.closeCode, 4409);
+});
+
+test("server rollout window may support multiple versions without allowing mixed rooms", () => {
+  for (const version of SUPPORTED_CLIENT_VERSIONS) {
+    assert.equal(
+      checkClientCompatibility(
+        String(PROTOCOL_VERSION),
+        version
+      ).ok,
+      true
+    );
+  }
+
+  if (SUPPORTED_CLIENT_VERSIONS.length > 1) {
+    const [first, second] = SUPPORTED_CLIENT_VERSIONS;
+    assert.equal(
+      checkRoomClientCompatibility(first, second).ok,
+      false
+    );
+  }
 });

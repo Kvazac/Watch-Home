@@ -64,6 +64,9 @@ jobs:
         run: |
           node scripts/verify-release.mjs "${{ steps.version.outputs.version }}"
 
+      - name: Verify local client/server compatibility
+        run: npm run verify:compatibility
+
       - name: Run tests
         run: npm test
 
@@ -77,7 +80,7 @@ jobs:
         run: npm run audit:runtime
 
       - name: Show version changes
-        run: git diff -- extension/manifest.json package.json package-lock.json
+        run: git diff -- extension/manifest.json package.json package-lock.json worker/src/release.js
 
       - name: Commit version bump
         env:
@@ -89,7 +92,8 @@ jobs:
           git add \
             extension/manifest.json \
             package.json \
-            package-lock.json
+            package-lock.json \
+            worker/src/release.js
 
           git commit -m "Bump Watch Home version to ${VERSION}"
           git push origin HEAD:main

@@ -1,3 +1,4 @@
+import { SERVER_RELEASE, SUPPORTED_CLIENT_VERSIONS } from "../worker/src/compatibility.js";
 import fs from "node:fs/promises";
 
 const expectedVersion = process.argv[2];
@@ -25,6 +26,21 @@ if (manifest.version !== expectedVersion) {
 if (packageJson.version !== expectedVersion) {
   console.error(
     `package.json version ${packageJson.version} does not match requested release ${expectedVersion}.`
+  );
+  process.exit(1);
+}
+
+
+if (SERVER_RELEASE !== expectedVersion) {
+  console.error(
+    `Server release ${SERVER_RELEASE} does not match requested release ${expectedVersion}.`
+  );
+  process.exit(1);
+}
+
+if (!SUPPORTED_CLIENT_VERSIONS.includes(expectedVersion)) {
+  console.error(
+    `Server does not advertise support for requested client ${expectedVersion}.`
   );
   process.exit(1);
 }

@@ -47,6 +47,9 @@ jobs:
       - name: Dry-run Cloudflare Worker build
         run: npx wrangler deploy --dry-run --outdir .wrangler-dry-run
 
+      - name: Verify deployed Worker supports this client version
+        run: npm run verify:compatibility:remote
+
       - name: Sign unlisted XPI with Mozilla
         env:
           WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
