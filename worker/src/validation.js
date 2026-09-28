@@ -1,6 +1,7 @@
 const ROOM_PATTERN = /^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{12}$/;
 const CLIENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MODES = new Set(["playing", "paused", "stalled", "offline"]);
+const CONTROL_MODES = new Set(["host-only", "everyone"]);
 
 export function isValidRoomId(roomId) {
   return ROOM_PATTERN.test(String(roomId ?? ""));
@@ -10,7 +11,7 @@ export function isValidClientId(clientId) {
   return CLIENT_ID_PATTERN.test(String(clientId ?? ""));
 }
 
-export function sanitizeHostState(value) {
+export function sanitizePlaybackState(value) {
   if (!value || typeof value !== "object") {
     return null;
   }
@@ -46,6 +47,12 @@ export function sanitizeHostState(value) {
     playbackRate,
     mode
   };
+}
+
+export const sanitizeHostState = sanitizePlaybackState;
+
+export function sanitizeControlMode(value) {
+  return CONTROL_MODES.has(value) ? value : null;
 }
 
 export function clampAnchorTime(estimatedServerTime, serverNow) {

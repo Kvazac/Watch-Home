@@ -7,7 +7,9 @@
 
   const NETWORK_ERROR_MESSAGE = "Could not reach the Watch Home server.";
   const RECONNECTING_MESSAGE = "Connection lost. Reconnecting…";
-  const TERMINAL_CLOSE_CODES = new Set([4003, 4008]);
+  const PROTOCOL_VERSION = globalThis.WatchHomeProtocol.PROTOCOL_VERSION;
+  const CLIENT_VERSION = browser.runtime.getManifest().version;
+  const TERMINAL_CLOSE_CODES = new Set([4003, 4008, 4406, 4409]);
 
   if (!syncMath) {
     throw new Error(
@@ -28,6 +30,8 @@
   let lastRoomState = null;
   let lastSequence = null;
   let participantCount = 0;
+  let controlMode = "host-only";
+  let backendCompatibility = null;
   let intentionallyClosed = false;
 
   const contentPorts = new Map();
@@ -101,6 +105,8 @@
     }
 
     session = stored.watchHomeSession ?? null;
+    controlMode = normalizeControlMode(session?.controlMode);
+
     if (!session) {
       return;
     }
@@ -139,6 +145,9 @@
       case "POPUP_OPEN_CORRECT":
         await openCorrectVideo();
         return buildStatus();
+
+      case "POPUP_SET_CONTROL_MODE":
+        return setControlMode(message.controlMode);
 
       default:
         return null;
@@ -201,6 +210,25 @@
         }
         break;
 
+      case MessageType.CONTROL_STATE:
+        if (
+          session &&
+          isSessionPort(port) &&
+          isSocketOpen() &&
+          (
+            session.role === "host" ||
+            controlMode === "everyone"
+          )
+        ) {
+          sendSocket({
+            type: MessageType.CONTROL_STATE,
+            reason: message.reason,
+            state: message.state,
+            estimatedServerTime: Date.now() + clockOffsetMs
+          });
+        }
+        break;
+
       case MessageType.REQUEST_STATE:
         if (isSessionPort(port) && isSocketOpen()) {
           sendSocket({ type: MessageType.REQUEST_STATE });
@@ -232,6 +260,11 @@
         error:
           "Open and start a Netflix movie or episode in the current tab before creating a party. Reload the Netflix watch page after installing or updating Watch Home."
       };
+    }
+
+    const compatibility = await ensureBackendCompatibility(true);
+    if (!compatibility.ok) {
+      return compatibility;
     }
 
     const roomId = globalThis.WatchHomeProtocol.createRoomId();
@@ -266,6 +299,11 @@
       };
     }
 
+    const compatibility = await ensureBackendCompatibility(true);
+    if (!compatibility.ok) {
+      return compatibility;
+    }
+
     await startSession({
       roomId,
       role: "guest",
@@ -295,6 +333,7 @@
     lastRoomState = null;
     lastSequence = null;
     participantCount = 0;
+    controlMode = "host-only";
     reconnectAttempt = 0;
     clockSamples = [];
     clockOffsetMs = 0;
@@ -323,6 +362,7 @@
     lastRoomState = null;
     lastSequence = null;
     participantCount = 0;
+    controlMode = "host-only";
     reconnectAttempt = 0;
     clockSamples = [];
     clockOffsetMs = 0;
@@ -351,6 +391,12 @@
       return;
     }
 
+    const compatibility = await ensureBackendCompatibility();
+    if (!compatibility.ok) {
+      await setCompatibilityFailure(compatibility.error);
+      return;
+    }
+
     clearReconnectTimer();
     closeSocket();
 
@@ -358,7 +404,9 @@
     const generation = ++socketGeneration;
     const query = new URLSearchParams({
       role: session.role,
-      clientId: stored.watchHomeClientId
+      clientId: stored.watchHomeClientId,
+      protocolVersion: String(PROTOCOL_VERSION),
+      clientVersion: CLIENT_VERSION
     });
 
     session.connected = false;
@@ -414,14 +462,24 @@
       if (session) {
         session.connected = false;
 
-        if (session.status !== "error") {
+        const compatibilityClose =
+          event.code === 4406 ||
+          event.code === 4409 ||
+          session.status === "compatibility-error";
+
+        if (compatibilityClose) {
+          session.status = "compatibility-error";
+          session.lastError ??=
+            "Watch Home client/server versions are incompatible. Update both clients and verify the server deployment.";
+        } else if (session.status !== "error") {
           session.status = "disconnected";
         }
 
         if (
           !intentionallyClosed &&
           reconnectAllowed &&
-          session.status !== "error"
+          session.status !== "error" &&
+          session.status !== "compatibility-error"
         ) {
           session.lastError = RECONNECTING_MESSAGE;
         }
@@ -455,10 +513,29 @@
           return;
         }
 
+        if (
+          Number(message.protocolVersion) !== PROTOCOL_VERSION ||
+          message.roomClientVersion !== CLIENT_VERSION
+        ) {
+          void setCompatibilityFailure(
+            Number(message.protocolVersion) !== PROTOCOL_VERSION
+              ? `Server protocol ${message.protocolVersion ?? "unknown"} is incompatible with client protocol ${PROTOCOL_VERSION}.`
+              : `This party requires Watch Home ${message.roomClientVersion ?? "unknown"}, but this client is ${CLIENT_VERSION}.`
+          );
+          safelyClose(
+            socket,
+            Number(message.protocolVersion) !== PROTOCOL_VERSION ? 4406 : 4409,
+            "Compatibility mismatch"
+          );
+          return;
+        }
+
         session.connected = true;
         session.status = "connected";
         session.role = message.role;
         session.lastError = null;
+        controlMode = normalizeControlMode(message.controlMode);
+        session.controlMode = controlMode;
         participantCount = message.participantCount ?? participantCount;
 
         if (message.state) {
@@ -513,6 +590,36 @@
         participantCount = message.participantCount ?? participantCount;
         break;
 
+      case MessageType.ROOM_SETTINGS:
+        controlMode = normalizeControlMode(message.controlMode);
+
+        if (session) {
+          session.controlMode = controlMode;
+          void persistSession();
+        }
+
+        broadcastSession();
+        sendToSessionContent({
+          type: MessageType.ROOM_SETTINGS,
+          controlMode
+        });
+        break;
+
+      case MessageType.CONTROL_REJECTED:
+        sendToSessionContent({
+          type: MessageType.CONTROL_REJECTED,
+          reason: message.reason ?? "Playback control was rejected."
+        });
+
+        if (lastRoomState) {
+          sendToSessionContent({
+            type: MessageType.ROOM_STATE,
+            state: lastRoomState,
+            clockOffsetMs
+          });
+        }
+        break;
+
       case MessageType.ERROR:
         if (!session) {
           return;
@@ -522,8 +629,21 @@
           message.message ?? "Server rejected the request.";
         session.status = "error";
 
-        if (message.retryable === false) {
+        if (
+          message.retryable === false ||
+          message.code === "PROTOCOL_MISMATCH" ||
+          message.code === "CLIENT_VERSION_MISMATCH" ||
+          message.code === "ROOM_CLIENT_VERSION_MISMATCH"
+        ) {
           reconnectAllowed = false;
+        }
+
+        if (
+          message.code === "PROTOCOL_MISMATCH" ||
+          message.code === "CLIENT_VERSION_MISMATCH" ||
+          message.code === "ROOM_CLIENT_VERSION_MISMATCH"
+        ) {
+          session.status = "compatibility-error";
         }
 
         void persistSession();
@@ -782,6 +902,8 @@
         ? globalThis.WatchHomeProtocol.formatRoomId(session.roomId)
         : null,
       participantCount,
+      controlMode,
+      compatibility: backendCompatibility,
       activeWatchId: active?.watchId ?? null,
       boundWatchId: bound?.watchId ?? null,
       partyWatchId: lastRoomState?.watchId ?? null,
@@ -804,7 +926,11 @@
             : null,
           reconnectAttempt,
           sequence: lastSequence,
-          socketState: socket?.readyState ?? null
+          socketState: socket?.readyState ?? null,
+          clientVersion: CLIENT_VERSION,
+          protocolVersion: PROTOCOL_VERSION,
+          serverProtocol: backendCompatibility?.serverProtocol ?? null,
+          serverRelease: backendCompatibility?.serverRelease ?? null
         },
         content: bound?.diagnostics ?? null,
         room: lastRoomState
@@ -812,11 +938,159 @@
               mode: lastRoomState.mode,
               watchId: lastRoomState.watchId,
               sequence: lastRoomState.sequence,
-              playbackRate: lastRoomState.playbackRate
+              playbackRate: lastRoomState.playbackRate,
+              controlMode
             }
           : null
       }
     };
+  }
+
+  async function setControlMode(value) {
+    if (!session) {
+      return {
+        ok: false,
+        error: "You are not currently in a party."
+      };
+    }
+
+    if (session.role !== "host") {
+      return {
+        ok: false,
+        error: "Only the host can change playback permissions."
+      };
+    }
+
+    if (!isSocketOpen()) {
+      return {
+        ok: false,
+        error: "Reconnect before changing playback permissions."
+      };
+    }
+
+    sendSocket({
+      type: MessageType.SET_CONTROL_MODE,
+      controlMode: normalizeControlMode(value)
+    });
+
+    return {
+      ok: true,
+      ...(await buildStatus())
+    };
+  }
+
+  function normalizeControlMode(value) {
+    return value === "everyone" ? "everyone" : "host-only";
+  }
+
+  async function ensureBackendCompatibility(force = false) {
+    const now = Date.now();
+
+    if (
+      !force &&
+      backendCompatibility?.checkedAt &&
+      now - backendCompatibility.checkedAt < 15000
+    ) {
+      return backendCompatibility;
+    }
+
+    try {
+      const response = await fetch(
+        `${config.backendHttpOrigin}/health`,
+        {
+          method: "GET",
+          cache: "no-store"
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const health = await response.json();
+      const serverProtocol = Number(health.protocol);
+      const supportedClientVersions = Array.isArray(
+        health.supportedClientVersions
+      )
+        ? health.supportedClientVersions.map(String)
+        : [];
+
+      if (serverProtocol !== PROTOCOL_VERSION) {
+        backendCompatibility = {
+          ok: false,
+          checkedAt: now,
+          code: "PROTOCOL_MISMATCH",
+          clientVersion: CLIENT_VERSION,
+          clientProtocol: PROTOCOL_VERSION,
+          serverProtocol,
+          serverRelease: health.release ?? null,
+          error:
+            `Watch Home ${CLIENT_VERSION} requires protocol ${PROTOCOL_VERSION}, ` +
+            `but the server reports protocol ${health.protocol ?? "unknown"}.`
+        };
+        return backendCompatibility;
+      }
+
+      if (
+        !Array.isArray(health.supportedClientVersions) ||
+        !supportedClientVersions.includes(CLIENT_VERSION)
+      ) {
+        backendCompatibility = {
+          ok: false,
+          checkedAt: now,
+          code: "CLIENT_VERSION_MISMATCH",
+          clientVersion: CLIENT_VERSION,
+          clientProtocol: PROTOCOL_VERSION,
+          serverProtocol,
+          serverRelease: health.release ?? null,
+          supportedClientVersions,
+          error:
+            `Watch Home ${CLIENT_VERSION} is not supported by server ` +
+            `${health.release ?? "unknown"}. Update the extension or server.`
+        };
+        return backendCompatibility;
+      }
+
+      backendCompatibility = {
+        ok: true,
+        checkedAt: now,
+        clientVersion: CLIENT_VERSION,
+        clientProtocol: PROTOCOL_VERSION,
+        serverProtocol,
+        serverRelease: health.release ?? null,
+        supportedClientVersions
+      };
+
+      return backendCompatibility;
+    } catch (error) {
+      backendCompatibility = {
+        ok: false,
+        checkedAt: now,
+        code: "COMPATIBILITY_CHECK_FAILED",
+        clientVersion: CLIENT_VERSION,
+        clientProtocol: PROTOCOL_VERSION,
+        error:
+          "Could not verify Watch Home server compatibility. " +
+          "Party creation/joining was blocked to avoid an unsafe mixed-version session."
+      };
+
+      console.warn("Watch Home compatibility check failed", error);
+      return backendCompatibility;
+    }
+  }
+
+  async function setCompatibilityFailure(message) {
+    reconnectAllowed = false;
+
+    if (!session) {
+      return;
+    }
+
+    session.connected = false;
+    session.status = "compatibility-error";
+    session.lastError = message;
+    await persistSession();
+    broadcastSession();
   }
 
   function buildInvite(roomId, watchId) {
@@ -838,6 +1112,9 @@
       role: session.role,
       connected: Boolean(session.connected),
       status: session.status,
+      controlMode,
+      clientVersion: CLIENT_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
       lastError: session.lastError ?? null
     };
   }

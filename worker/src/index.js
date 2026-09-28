@@ -1,4 +1,9 @@
 import { PartyRoom } from "./party-room.js";
+import {
+  PROTOCOL_VERSION,
+  SERVER_RELEASE,
+  SUPPORTED_CLIENT_VERSIONS
+} from "./compatibility.js";
 import { isValidRoomId } from "./validation.js";
 
 export { PartyRoom };
@@ -11,17 +16,20 @@ export default {
       return Response.json({
         ok: true,
         service: "watch-home",
-        protocol: 1,
-        release: "1.1.0"
+        protocol: PROTOCOL_VERSION,
+        release: SERVER_RELEASE,
+        supportedClientVersions: SUPPORTED_CLIENT_VERSIONS
       });
     }
 
     const match = url.pathname.match(/^\/ws\/([^/]+)$/);
+
     if (!match || request.method !== "GET") {
       return new Response("Not found.", { status: 404 });
     }
 
     const roomId = match[1];
+
     if (!isValidRoomId(roomId)) {
       return new Response("Invalid room ID.", { status: 400 });
     }

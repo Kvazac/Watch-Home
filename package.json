@@ -15,7 +15,9 @@
     "audit:runtime": "npm audit --omit=dev",
     "check:all": "npm test && npm run lint:addon && npm run check:compliance && npm run audit:runtime",
     "verify:release": "node scripts/verify-release.mjs",
-    "version:set": "node scripts/set-version.mjs"
+    "version:set": "node scripts/set-version.mjs",
+    "verify:compatibility": "node scripts/verify-compatibility.mjs",
+    "verify:compatibility:remote": "node scripts/verify-compatibility.mjs --remote"
   },
   "engines": {
     "node": ">=22"
